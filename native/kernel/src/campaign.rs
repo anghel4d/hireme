@@ -246,8 +246,10 @@ pub struct Cv {
     pub root: Option<u32>,
     /// Whether that version is a file (a PDF or DOCX upload).
     pub file: bool,
-    /// A root whose newest version is a file, for a first email.
+    /// The newest root whose version is a file, for a route that sends one.
     pub file_root: Option<u32>,
+    /// The newest root with a version, when no rule picks one.
+    pub newest: Option<u32>,
 }
 
 /// Everything the route reads about one application.
@@ -363,6 +365,8 @@ pub enum Ask {
     Cv,
     Key(u32),
     Mailbox,
+    /// A shot the agent could not get through: the operator sends it by hand.
+    ByHand(u32),
     /// A reply that names no address or contact to answer it through.
     Sender(u32),
     Assessment(u32),
@@ -436,9 +440,11 @@ impl Facts {
         self.live().find(|m| m.role == role)
     }
 
-    /// A target a mission of this kind went to and lost (cancelled).
+    /// A target a mission of this kind went to and lost: cancelled, or
+    /// bounced and not yet cancelled.
     fn dead(&self, kind: Kind, target: &str) -> bool {
-        self.missions.iter().any(|m| m.state == MState::Cancelled && m.kind == kind && m.target.eq_ignore_ascii_case(target))
+        let lost = |m: &Mission| m.state == MState::Cancelled || m.last_error.as_deref() == Some("bounced");
+        self.missions.iter().any(|m| lost(m) && m.kind == kind && m.target.eq_ignore_ascii_case(target))
     }
 
     /// It went out only by a primary whose mail bounced: routed again.
@@ -469,6 +475,21 @@ impl Facts {
                 (_, Role::Nudge) => self.mission(Role::Primary).and_then(|m| m.message_id.as_ref()).is_none(),
                 _ => true,
             }
+    }
+
+    /// Why the CV must be a file, when a shot carries it: a careers form
+    /// takes it as an upload, a first mail as an attachment. A reply in a
+    /// thread, a LinkedIn note or an intro by LinkedIn carries none.
+    pub fn file_need(&self) -> Option<&'static str> {
+        let wants = self.wants();
+        let mail = |m: &Mission| m.kind == Kind::Email && !m.threaded && matches!(m.state, MState::Draft | MState::DraftReady | MState::FireReady);
+        if wants.iter().any(|w| w.kind == Kind::CareersPage && !self.mission(w.role).is_some_and(|m| m.state == MState::Fired)) {
+            Some("the form takes the CV as a file")
+        } else if wants.iter().any(|w| self.opens_thread(w) && self.mission(w.role).is_none()) || self.live().any(mail) {
+            Some("a first email carries the CV as a file")
+        } else {
+            None
+        }
     }
 
     /// The route's missions, in the order they go: a referral's intro, the
@@ -661,11 +682,11 @@ fn rail(f: &Facts, wants: &[Want]) -> Option<(Phase, Next)> {
     if f.stage < Stage::InBatch {
         return Some((Phase::Batch, Next::Do(Act::Stage(Stage::InBatch))));
     }
-    if !f.cv.file && wants.iter().any(|w| f.opens_thread(w)) {
+    if !f.cv.file && f.file_need().is_some() {
         return Some((Phase::Documents, cv_file(f)));
     }
-    if !f.cv.pinned {
-        return Some((Phase::Documents, f.cv.root.map_or(Next::Ask(Ask::Cv), |r| Next::Do(Act::Pin(r)))));
+    if !f.cv.pinned && let Some(root) = f.cv.root.or(f.cv.newest) {
+        return Some((Phase::Documents, Next::Do(Act::Pin(root))));
     }
     if !f.letter && (f.letter_asked || wants.iter().any(|w| w.role == Role::Primary && f.opens_thread(w))) {
         return Some((Phase::Documents, Next::Do(Act::Letter)));
@@ -680,7 +701,7 @@ fn day_pack(f: &Facts) -> Next {
     })
 }
 
-/// A first mail carries the CV as a file: pin a root whose newest version
+/// A route that sends the CV sends it as a file: pin the newest root that
 /// is one, or ask for one.
 fn cv_file(f: &Facts) -> Next {
     f.cv.file_root.map_or(Next::Ask(Ask::Cv), |r| Next::Do(Act::Pin(r)))
@@ -697,9 +718,11 @@ fn shots(f: &Facts, b: &mut Build, list: &[(Want, Option<&Mission>)]) -> Option<
         if m.kind == Kind::LinkedIn && m.draft_len > NOTE_MAX && matches!(m.state, MState::Draft | MState::DraftReady | MState::FireReady) {
             b.warn("length", alloc::format!("mission:{} is {}/{NOTE_MAX} chars; LinkedIn cuts a connection note at {NOTE_MAX}", m.id, m.draft_len));
         }
-        let first_mail = m.kind == Kind::Email && !m.threaded;
+        // A form takes the CV as a file, and so does a first mail (the put
+        // refuses its fire_ready without one), whatever the rail did.
+        let file = m.kind == Kind::CareersPage || (m.kind == Kind::Email && !m.threaded);
         match m.state {
-            MState::Draft | MState::DraftReady if first_mail && !f.cv.file => return Some((P::Documents, cv_file(f))),
+            MState::Draft | MState::DraftReady if file && !f.cv.file => return Some((P::Documents, cv_file(f))),
             MState::Draft | MState::DraftReady => return Some((P::Stage, Next::Do(Act::Ready(m.id)))),
             MState::FireReady if m.last_error.as_deref() == Some("bounced") => return Some((P::Confirm, Next::Do(Act::Cancel(m.id)))),
             MState::FireReady => match m.hold {
@@ -735,9 +758,13 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
         }
         return (P::FireKey, Next::Do(Act::Request(uncovered(f))));
     };
+    // A shot the agent could not get through (a login wall, a captcha) is
+    // the operator's to send by hand; a mail the node sends again.
+    if m.kind != Kind::Email && m.last_error.is_some() {
+        return (P::Fire, Next::Ask(Ask::ByHand(m.id)));
+    }
     if let Some(e) = &m.last_error {
-        let then = if m.kind == Kind::Email { "fire it again" } else { "fire it again; a wall you cannot pass goes to the operator to send by hand, then report it landed" };
-        b.warn("failed", alloc::format!("mission:{} failed last time ({e}); the key still covers it: {then}", m.id));
+        b.warn("failed", alloc::format!("mission:{} failed last time ({e}); the key still covers it: fire it again", m.id));
     }
     if m.kind == Kind::Email && !f.mailbox {
         (P::Fire, Next::Ask(Ask::Mailbox))
@@ -749,10 +776,11 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
 }
 
 /// The application's fire_ready missions no live key covers and no open
-/// request names: what one request asks for.
+/// request names, but one that bounced: what one request asks for.
 fn uncovered(f: &Facts) -> Vec<u32> {
     let asked: Vec<u32> = f.requests.iter().filter(|r| r.open).flat_map(|r| r.covers.iter().copied()).collect();
-    let mut ids: Vec<u32> = f.live().filter(|m| m.state == MState::FireReady && m.covered.is_none() && !asked.contains(&m.id) && m.hold.is_none_or(|h| matches!(h, "app_stage" | "unsettled"))).map(|m| m.id).collect();
+    let open = |m: &&Mission| m.state == MState::FireReady && m.covered.is_none() && !asked.contains(&m.id) && m.last_error.as_deref() != Some("bounced");
+    let mut ids: Vec<u32> = f.live().filter(open).filter(|m| m.hold.is_none_or(|h| matches!(h, "app_stage" | "unsettled"))).map(|m| m.id).collect();
     ids.sort_unstable();
     ids
 }
@@ -877,7 +905,14 @@ fn call(f: &Facts, act: &Act) -> (&'static str, Json, String) {
             };
             ("put", json!({"table": "batches", "set": {"code": code, "ordinal": ordinal, "kind": "day_pack", "queued_on": iso(f.today)}}), "today's day pack does not exist yet: make it, then join it".into())
         }
-        Act::Pin(root) => ("pick_cv", json!({"ref": app, "cv_root_id": root}), if f.cv.file { "confirm the CV the rules picked".into() } else { "a first email carries the CV as a file: pin a PDF or DOCX".into() }),
+        Act::Pin(root) => {
+            let why = match f.file_need() {
+                Some(need) if !f.cv.file => alloc::format!("{need}: pin a PDF or DOCX"),
+                _ if Some(*root) == f.cv.root => "confirm the CV the rules picked".into(),
+                _ => alloc::format!("no rule picks a CV for {app}: pin the newest"),
+            };
+            ("pick_cv", json!({"ref": app, "cv_root_id": root}), why)
+        }
         Act::Letter => ("put", json!({"ref": app, "set": {"letter_raw": "<the letter: why this role, what you bring>"}}), "write the letter the route carries (an email's body, a form's letter field)".into()),
         Act::Research => (
             "put",
@@ -983,10 +1018,21 @@ fn ask_text(f: &Facts, a: &Ask) -> (String, String) {
         Ask::Gate => (alloc::format!("{app} is gated maybe: pursue it or skip it? (gate pursue|skip)"), "the fit is the operator's call"),
         Ask::Prior => (alloc::format!("the old ledger says {app} was already applied to: did it go out? (prior_send applied or not_applied)"), "no double applications"),
         Ask::Route => (alloc::format!("no route to apply at {}: a careers form, an address or a person to write to?", f.company), "the company's contacts give none"),
-        Ask::Cv => (alloc::format!("no CV to send with {app}: upload one (a PDF or DOCX for a first email)"), "a first email carries the CV as a file"),
+        Ask::Cv => {
+            let need = f.file_need().unwrap_or("the application goes out with a CV");
+            return (alloc::format!("no CV file for {app}: upload a PDF or DOCX ({need})"), need.into());
+        }
         Ask::Key(r) => (alloc::format!("approve the fire key for {app}: /fire/{r}"), "only the operator makes a fire key; stop here until it is granted"),
         Ask::Mailbox => ("link Gmail (Account → Mail) so the mail can go".into(), "no live mailbox"),
-        Ask::Sender(r) => (alloc::format!("outreach:{r} names no address or contact to answer through: link its sender's contact, or mark it seen once answered by hand"), "hireme cannot reach the sender"),
+        Ask::ByHand(m) => {
+            let m = f.missions.iter().find(|x| x.id == *m);
+            let (id, target, error) = (m.map_or(0, |m| m.id), m.map_or("", |m| m.target.as_str()), m.and_then(|m| m.last_error.as_deref()).unwrap_or("failed"));
+            (
+                alloc::format!("mission:{id} failed ({error}): send it by hand{}, then say so", if target.is_empty() { String::new() } else { alloc::format!(" at {target}") }),
+                "a wall the agent cannot pass; once it is sent, fire it under its key and report it landed with what was sent",
+            )
+        }
+        Ask::Sender(r) => (alloc::format!("outreach:{r} leaves no live address or contact to answer through: link its sender's contact, or mark it seen once answered by hand"), "hireme cannot reach the sender"),
         Ask::Assessment(r) => (alloc::format!("outreach:{r} is an assessment for {app}: take it (then mark it seen) or decline (close {app} withdrawn)?"), "the operator's own work"),
         Ask::Offer(r) => (alloc::format!("outreach:{r} reads as an offer for {app}: accept (close it offer) or decline (close it declined)?"), "the operator's decision"),
     };
@@ -1057,6 +1103,7 @@ pub struct Index<'r> {
     requests: Vec<(u32, u32, Ranges)>,
     day_pack: DayPack,
     file_root: Option<u32>,
+    newest: Option<u32>,
     mailbox: bool,
     cap_reset: Option<Day>,
     today: Day,
@@ -1104,10 +1151,16 @@ impl<'r> Index<'r> {
         }
         let code = (1..).map(|n| if n == 1 { code.clone() } else { alloc::format!("{code}-{n}") }).find(|c| !taken.contains(c)).unwrap_or(code);
         let day_pack = today_pack.map_or(DayPack::Make { code, ordinal: ordinal + 1 }, DayPack::Today);
-        let file_root = rows.each(table::CV_ROOTS).find_map(|(t, id)| {
-            let v = t.u32(id, cv_roots::VERSION_ID)?;
-            rows.table(table::CV_VERSIONS).and_then(|vt| vt.str(v, cv_versions::BLOB_SHA)).filter(|s| !s.is_empty()).map(|_| id)
-        });
+        // The newest root with a version, and the newest whose version is a file.
+        let versioned: Vec<(u32, bool)> = rows
+            .each(table::CV_ROOTS)
+            .filter_map(|(t, id)| {
+                let v = t.u32(id, cv_roots::VERSION_ID)?;
+                Some((id, rows.table(table::CV_VERSIONS).and_then(|vt| vt.str(v, cv_versions::BLOB_SHA)).is_some_and(|s| !s.is_empty())))
+            })
+            .collect();
+        let file_root = versioned.iter().filter(|r| r.1).map(|r| r.0).max();
+        let newest = versioned.iter().map(|r| r.0).max();
         let (cap, used, resets) = fire::quota(rows, now);
         Index {
             rows,
@@ -1118,6 +1171,7 @@ impl<'r> Index<'r> {
             requests,
             day_pack,
             file_root,
+            newest,
             mailbox: fire::mailbox_live(rows),
             cap_reset: (used >= cap).then(|| day_of(resets)),
             today,
@@ -1157,7 +1211,7 @@ impl<'r> Index<'r> {
         };
         let pick = self.cvs.pick(rows, app);
         let file_version = |v: Option<u32>| v.and_then(|v| rows.table(table::CV_VERSIONS).and_then(|vt| vt.str(v, cv_versions::BLOB_SHA))).is_some_and(|s| !s.is_empty());
-        let cv = Cv { pinned: pick.state == crate::pick::State::Pinned, root: pick.root, file: file_version(pick.version), file_root: self.file_root };
+        let cv = Cv { pinned: pick.state == crate::pick::State::Pinned, root: pick.root, file: file_version(pick.version), file_root: self.file_root, newest: self.newest };
         let listed = crate::filer::lex(&listing_raw).into_iter().find(|tk| tk.class == crate::filer::Class::Address).map(|tk| tk.text);
         let words = crate::filer::words(&listing_raw);
         let letter_asked = ["cover letter", "motivation letter", "anschreiben", "lettre de motivation"].iter().any(|p| alloc::format!(" {words} ").contains(&alloc::format!(" {p} ")));

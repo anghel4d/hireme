@@ -47,6 +47,8 @@ enum Cvs {
     Text,
     /// No CV at all until the operator uploads one.
     Missing,
+    /// Roots, a PDF among them, that no rule picks.
+    Unpicked,
 }
 
 /// The old ledger's word on a send before hireme.
@@ -65,7 +67,8 @@ enum Script {
     InterviewThenOffer,
     AutoReply,
     Assessment,
-    /// The primary's mail bounces the next day.
+    /// The primary's mail bounces the next day, when an interview request
+    /// comes from another address.
     Bounce,
     /// A rejection crosses the next shot that goes out after the first.
     Crossing,
@@ -148,9 +151,10 @@ fn start(w: World) -> Sim {
         People::HiringManager => vec![person(8, Relation::HiringManager, true)],
     };
     let cv = match w.cv {
-        Cvs::File => Cv { pinned: false, root: Some(1), file: true, file_root: Some(1) },
-        Cvs::Text => Cv { pinned: false, root: Some(1), file: false, file_root: Some(2) },
+        Cvs::File => Cv { pinned: false, root: Some(1), file: true, file_root: Some(1), newest: Some(1) },
+        Cvs::Text => Cv { pinned: false, root: Some(1), file: false, file_root: Some(2), newest: Some(2) },
         Cvs::Missing => Cv::default(),
+        Cvs::Unpicked => Cv { pinned: false, root: None, file: false, file_root: Some(2), newest: Some(2) },
     };
     let mut f = Facts {
         app: 1,
@@ -214,7 +218,7 @@ impl Sim {
     fn is_file(&self, root: u32) -> bool {
         match root {
             1 => self.w.cv == Cvs::File,
-            2 => self.w.cv == Cvs::Text,
+            2 => matches!(self.w.cv, Cvs::Text | Cvs::Unpicked),
             _ => self.uploaded,
         }
     }
@@ -222,7 +226,8 @@ impl Sim {
     /// What the company sends back, counted from day `a`.
     fn script(&mut self, a: i32) {
         self.due = match self.w.script {
-            Script::Silence | Script::Bounce | Script::Crossing => vec![],
+            Script::Silence | Script::Crossing => vec![],
+            Script::Bounce => vec![(a + 1, Reads::Interview)],
             Script::Rejection => vec![(a + 5, Reads::Rejection)],
             Script::InterviewThenOffer => vec![(a + 3, Reads::Interview), (a + 10, Reads::Offer)],
             Script::AutoReply => vec![(a, Reads::AutoReply), (a + 20, Reads::Rejection)],
@@ -333,6 +338,10 @@ impl Sim {
         if !target.is_empty() {
             kernel::fire::target(kind, &target).map_err(|e| format!("{} target {target}: {e}", kind.name()))?;
         }
+        let lost = |m: &Mission| m.state == MState::Cancelled || m.last_error.as_deref() == Some("bounced");
+        if self.f.missions.iter().any(|m| lost(m) && m.kind == kind && !target.is_empty() && m.target == target) {
+            return Err(format!("a mission to {target}, which bounced"));
+        }
         let answers = reply.or(match role {
             Role::Reply(r) => Some(r),
             _ => None,
@@ -363,7 +372,7 @@ impl Sim {
                 self.f.batch = true;
             }
             Act::Pin(root) => {
-                self.f.cv = Cv { pinned: true, root: Some(*root), file: self.is_file(*root), file_root: self.f.cv.file_root };
+                self.f.cv = Cv { pinned: true, root: Some(*root), file: self.is_file(*root), ..self.f.cv };
                 let file = self.f.cv.file;
                 for m in self.f.missions.iter_mut().filter(|m| m.state == MState::FireReady) {
                     m.hold = (m.kind == Kind::Email && !m.threaded && !file).then_some("cv_file");
@@ -387,8 +396,8 @@ impl Sim {
                 }
                 for id in ids {
                     let m = self.m(*id)?;
-                    if m.state != MState::FireReady || m.covered.is_some() {
-                        return Err(format!("a request names mission:{id}, {:?} and covered {:?}", m.state, m.covered));
+                    if m.state != MState::FireReady || m.covered.is_some() || m.last_error.as_deref() == Some("bounced") {
+                        return Err(format!("a request names mission:{id}, {:?}, covered {:?}, {:?}", m.state, m.covered, m.last_error));
                     }
                 }
                 let id = self.id();
@@ -398,7 +407,11 @@ impl Sim {
                 if self.f.stage < Stage::FireReady {
                     return Err("fired below fire_ready (app_stage)".into());
                 }
+                let file = self.f.cv.file;
                 let m = self.m(*mission)?;
+                if m.kind == Kind::CareersPage && !file {
+                    return Err(format!("mission:{mission}'s form goes without a CV file"));
+                }
                 if m.state != MState::FireReady || m.covered != Some(*key) || m.hold.is_some() {
                     return Err(format!("fire refuses mission:{mission}: {:?}, covered {:?}, held {:?}", m.state, m.covered, m.hold));
                 }
@@ -450,8 +463,11 @@ impl Sim {
             }
             Ask::Route => self.f.form = Some("https://acme.example/careers/staff".into()),
             Ask::Cv => {
+                if self.f.cv.file_root.is_some() {
+                    return Err("asked for a CV while a PDF root is there to pin".into());
+                }
                 self.uploaded = true;
-                self.f.cv = Cv { pinned: false, root: Some(3), file: true, file_root: Some(3) };
+                self.f.cv = Cv { pinned: false, root: Some(3), file: true, file_root: Some(3), newest: Some(3) };
             }
             Ask::Key(r) => {
                 let decline = self.w.decline && !self.declined;
@@ -469,6 +485,17 @@ impl Sim {
                         m.covered = Some(KEY);
                     }
                 }
+            }
+            Ask::ByHand(id) => {
+                // Sent by hand; the agent records it: fired under its key, reported landed.
+                let m = self.m(*id)?;
+                if m.state != MState::FireReady || m.covered.is_none() || m.kind == Kind::Email {
+                    return Err(format!("by hand on mission:{id}: {:?}, covered {:?}, {}", m.state, m.covered, m.kind.name()));
+                }
+                m.state = MState::InFlight;
+                m.covered = None;
+                m.last_error = None;
+                self.outcome(*id)?;
             }
             Ask::Sender(r) | Ask::Assessment(r) => self.f.replies.iter_mut().filter(|x| x.id == *r).for_each(|x| x.seen = true),
             Ask::Offer(_) => self.close("offer")?,
@@ -581,7 +608,7 @@ fn every_route_ends_closed() {
                 run(World { fresh: Fresh::Closed, ..base }, &mut walks);
                 run(World { gate: Gate::Skip, ..base }, &mut walks);
                 run(World { gate: Gate::Maybe, pursue: false, ..base }, &mut walks);
-                for cv in [Cvs::File, Cvs::Text, Cvs::Missing] {
+                for cv in [Cvs::File, Cvs::Text, Cvs::Missing, Cvs::Unpicked] {
                     for (decline, fail) in [(false, false), (true, true)] {
                         for script in scripts {
                             for ledger in [Ledger::Silent, Ledger::WentOut] {
@@ -594,7 +621,7 @@ fn every_route_ends_closed() {
             }
         }
     }
-    assert_eq!(walks, 6 * 3 * 4 * (3 + 3 * 2 * scripts.len() * 2));
+    assert_eq!(walks, 6 * 3 * 4 * (3 + 4 * 2 * scripts.len() * 2));
     for outcome in ["expired", "skipped", "rejected", "ghosted", "offer"] {
         assert!(closes.contains_key(outcome), "no walk closed {outcome}: {closes:?}");
     }
@@ -602,7 +629,7 @@ fn every_route_ends_closed() {
     for v in ["Capture", "Link", "Freshness", "Gate", "Stage", "Close", "MakeBatch", "JoinBatch", "Pin", "Letter", "Research", "Want", "Ready", "Request", "Fire", "Report", "Cancel", "Ignore"] {
         assert!(nexts.contains(&format!("Do {v}")), "no walk did {v}: {nexts:?}");
     }
-    for v in ["Gate", "Prior", "Route", "Cv", "Key", "Assessment", "Offer"] {
+    for v in ["Gate", "Prior", "Route", "Cv", "Key", "ByHand", "Assessment", "Offer"] {
         assert!(nexts.contains(&format!("Ask {v}")), "no walk asked {v}: {nexts:?}");
     }
 }
@@ -679,8 +706,15 @@ const AGENT: u32 = 3;
 
 /// Application 7 (app:412) at Acme: a listing with its careers form, linked
 /// to Acme and Germany; Rita, Acme's recruiter, with an address and a
-/// LinkedIn profile; a PDF CV; a live mailbox. `apps` adds applications.
+/// LinkedIn profile; a PDF CV, the default; a live mailbox. `apps` adds
+/// applications.
 fn desk(apps: Json) -> Kernel {
+    desk_cv(apps, true, true)
+}
+
+/// The desk with one CV root: a PDF (`pdf`) or a text CV, the default or
+/// picked by nothing (`default`).
+fn desk_cv(apps: Json, pdf: bool, default: bool) -> Kernel {
     let mut all = vec![json_app(7, 412, "discovered", 80)];
     all.extend(apps.as_array().cloned().unwrap_or_default());
     fixture::kernel(serde_json::json!({
@@ -688,9 +722,9 @@ fn desk(apps: Json) -> Kernel {
         "places": [{"id": 1, "kind": "country", "iso2": "DE", "name": "Germany"}],
         "applications": all,
         "contacts": [{"id": 9, "corporation_id": 1, "name": "Rita", "relation": "recruiter", "email": "rita@acme.example", "linkedin_url": "https://www.linkedin.com/in/rita-acme"}],
-        "cv_roots": [{"id": 1, "slug": "main", "name": "Main", "format": "pdf", "version_id": 5}],
-        "cv_versions": [{"id": 5, "root_id": 1, "n": 1, "blob_sha": "5f1e9b", "actor": "operator"}],
-        "me": [{"id": 1, "cv_default_root_id": 1}],
+        "cv_roots": [{"id": 1, "slug": "main", "name": "Main", "format": if pdf { "pdf" } else { "markdown" }, "version_id": 5}],
+        "cv_versions": [{"id": 5, "root_id": 1, "n": 1, "blob_sha": if pdf { "5f1e9b" } else { "" }, "actor": "operator"}],
+        "me": [{"id": 1, "cv_default_root_id": if default { serde_json::json!(1) } else { Json::Null }}],
         "mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "live", "daily_cap": 20}],
     }))
 }
@@ -909,4 +943,28 @@ fn the_pick_is_the_open_application_closest_to_done() {
     assert_eq!(q(&mut k, serde_json::json!({"op": "campaign", "no": 412}))["phase"]["name"], "qualify");
     let r = k.query(&serde_json::json!({"op": "campaign", "application": 999}));
     assert_eq!(r.expect_err("no application 999").code, schema::refusal::NOT_FOUND);
+}
+
+#[test]
+fn a_cv_no_rule_picks_is_pinned_and_a_missing_file_asked_for_by_its_route() {
+    // A PDF no rule picks: the agent pins it (the form takes the CV as a
+    // file), and the route goes to its close without asking for one.
+    let mut k = desk_cv(serde_json::json!([]), true, false);
+    let answers = follow(&mut k, (7, 412), TODAY, "applied");
+    let pin = answers.iter().find(|a| a["next"]["tool"] == "pick_cv").expect("a pin");
+    assert_eq!((pin["next"]["args"]["cv_root_id"].as_u64(), pin["next"]["why"].as_str()), (Some(1), Some("the form takes the CV as a file: pin a PDF or DOCX")), "{pin}");
+    assert!(!answers.iter().any(|a| a["next"]["kind"] == "ask" && a["next"]["ask"].as_str().is_some_and(|t| t.contains("CV"))));
+    // Only a text CV: the operator is asked for a file, in the route's words.
+    let mut k = desk_cv(serde_json::json!([]), false, true);
+    let mut ask = Json::Null;
+    for _ in 0..20 {
+        let a = q(&mut k, serde_json::json!({"op": "campaign", "application": 7, "now": noon(TODAY)}));
+        if a["next"]["kind"] != "do" {
+            ask = a;
+            break;
+        }
+        let (op, _) = op_of(&mut k, &a["next"], (7, 412));
+        k.predict(&op, &Ctx { today: TODAY, now: noon(TODAY), human: false, key_id: Some(AGENT), held: &[] }).unwrap();
+    }
+    assert_eq!((ask["phase"]["name"].as_str(), ask["next"]["why"].as_str()), (Some("documents"), Some("the form takes the CV as a file")), "{ask}");
 }
