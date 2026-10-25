@@ -21,6 +21,12 @@ A ref is `<kind>:<key>`. Nine kinds, each one table:
 | `fire_key:51` | fire_keys | id |
 | `fire_request:88` | fire_requests | id |
 
+The table of kinds is the kernel's, `kernel::refs::KINDS` in
+`native/kernel/src/refs.rs` (the kind, its prefix, its table): the campaign writes
+every ref it renders by it (`refs::app`, `mission`, `contact`, `outreach`,
+`request`), and the resolver re-exports `Kind` and reads the table, so the
+grammar is defined once.
+
 `<kind>:new` names a row to insert (`"ref":"mission:new"`); it is accepted
 by `put` alone. A ref is parsed strictly: the kind must be one of the nine,
 the key a whole number from 1 (`app`, ids) or a domain (`corp`); anything

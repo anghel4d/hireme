@@ -17,56 +17,15 @@ use serde_json::{Map, Value as Json, json};
 use crate::tools::{self, Field, Masks};
 
 /// A ref's kind: one table each.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    App,
-    Mission,
-    Contact,
-    Corp,
-    Place,
-    Outreach,
-    Batch,
-    FireKey,
-    FireRequest,
+pub use kernel::refs::{KINDS, Kind};
+
+/// The kind's table by name, as the tools name it.
+fn table_name(k: Kind) -> &'static str {
+    schema::table_def(k.table()).map_or("", |t| t.name)
 }
 
-const KINDS: [(Kind, &str, &str); 9] = [
-    (Kind::App, "app", "applications"),
-    (Kind::Mission, "mission", "missions"),
-    (Kind::Contact, "contact", "contacts"),
-    (Kind::Corp, "corp", "corporations"),
-    (Kind::Place, "place", "places"),
-    (Kind::Outreach, "outreach", "outreach"),
-    (Kind::Batch, "batch", "batches"),
-    (Kind::FireKey, "fire_key", "fire_keys"),
-    (Kind::FireRequest, "fire_request", "fire_requests"),
-];
-
-impl Kind {
-    pub fn prefix(self) -> &'static str {
-        KINDS.iter().find(|k| k.0 == self).map_or("", |k| k.1)
-    }
-
-    pub fn table(self) -> &'static str {
-        KINDS.iter().find(|k| k.0 == self).map_or("", |k| k.2)
-    }
-
-    pub fn of_table(name: &str) -> Option<Kind> {
-        KINDS.iter().find(|k| k.2 == name).map(|k| k.0)
-    }
-
-    fn of_prefix(p: &str) -> Option<Kind> {
-        KINDS.iter().find(|k| k.1 == p).map(|k| k.0)
-    }
-
-    /// What a ref of this kind looks like.
-    pub fn form(self) -> String {
-        match self {
-            Kind::App => "app:<the application's number>".into(),
-            Kind::Corp => "corp:<domain>".into(),
-            k => format!("{}:<id>", k.prefix()),
-        }
-    }
+fn kind_of_table(name: &str) -> Option<Kind> {
+    crate::tools::table_named(name).and_then(|t| Kind::of_table(t.id))
 }
 
 /// One ref, parsed: a row to insert, a row by its number or id, or a
@@ -134,7 +93,7 @@ pub fn corp(domain: &str) -> String {
 /// An id-keyed kind's ref; none for applications (by number) and
 /// corporations (by domain), which [`app`] and [`corp`] write.
 pub fn of(table: &str, id: u32) -> Option<String> {
-    Kind::of_table(table).filter(|k| !matches!(k, Kind::App | Kind::Corp)).map(|k| format!("{}:{id}", k.prefix()))
+    kind_of_table(table).filter(|k| !matches!(k, Kind::App | Kind::Corp)).map(|k| kernel::refs::of(k, id))
 }
 
 // ------------------------------------------------------------ the replica
@@ -201,7 +160,7 @@ fn not_a_ref(field: &str, why: String) -> Refused {
 
 /// A row no ref names: `app:412` with no application 412.
 fn missing(field: &str, r: &Ref, text: &str) -> Refused {
-    refuse("not_found", json!({"field": field, "table": r.kind().table(), "ref": text, "reason": format!("no row {text}")}))
+    refuse("not_found", json!({"field": field, "table": table_name(r.kind()), "ref": text, "reason": format!("no row {text}")}))
 }
 
 /// The nearest known key, by exact match, prefix or a small edit distance.
@@ -391,7 +350,7 @@ pub fn resolve(tool: &str, args: &Json, look: &mut dyn Lookup) -> Result<Json, R
                 for p in c.params {
                     let Some(v) = a.get(p.name).cloned() else { continue };
                     if p.ty() == "ref"
-                        && let Some(kind) = p.target.and_then(Kind::of_table)
+                        && let Some(kind) = p.target.and_then(kind_of_table)
                     {
                         a.insert(p.name.into(), resolve_one(&v, kind, p.name, look)?);
                     } else if name == "fire" && p.name == "key" && v.is_string() {
@@ -443,7 +402,7 @@ fn row_ref(mut a: Map<String, Json>, fixed: Option<&str>, look: &mut dyn Lookup,
     let r = parse(&text).map_err(|w| not_a_ref("ref", w))?;
     let table = match fixed {
         Some(t) => {
-            let want = Kind::of_table(t).ok_or_else(|| not_a_ref("ref", format!("{t} rows have no ref; name the row by id")))?;
+            let want = kind_of_table(t).ok_or_else(|| not_a_ref("ref", format!("{t} rows have no ref; name the row by id")))?;
             if r.kind() != want {
                 return Err(wrong_kind("ref", want, &text));
             }
@@ -451,11 +410,11 @@ fn row_ref(mut a: Map<String, Json>, fixed: Option<&str>, look: &mut dyn Lookup,
         }
         None => {
             if let Some(given) = a.get("table").and_then(Json::as_str)
-                && given != r.kind().table()
+                && given != table_name(r.kind())
             {
-                return Err(refuse("ref", json!({"field": "ref", "ref": text, "table": given, "reason": format!("{text} is a {} row, not {given}", r.kind().table())})));
+                return Err(refuse("ref", json!({"field": "ref", "ref": text, "table": given, "reason": format!("{text} is a {} row, not {given}", table_name(r.kind()))})));
             }
-            r.kind().table()
+            table_name(r.kind())
         }
     };
     a.insert("table".into(), json!(table));
@@ -498,7 +457,7 @@ fn resolve_fields(a: &mut Map<String, Json>, under: &str, t: &TableDef, look: &m
             && ref_like(s)
             && let Some(c) = t.col_named(name)
             && c.ty() == "ref"
-            && let Some(kind) = c.target.and_then(Kind::of_table)
+            && let Some(kind) = c.target.and_then(kind_of_table)
         {
             *v = resolve_one(&Json::String(s.to_owned()), kind, name, look)?;
         }
@@ -512,7 +471,7 @@ fn resolve_fields(a: &mut Map<String, Json>, under: &str, t: &TableDef, look: &m
 fn resolve_where(a: &mut Map<String, Json>, t: &TableDef, look: &mut dyn Lookup) -> Result<(), Refused> {
     let Some(Json::Object(mut w)) = a.get("where").cloned() else { return Ok(()) };
     for (name, cond) in w.iter_mut() {
-        let Some(kind) = t.col_named(name).filter(|c| c.ty() == "ref").and_then(|c| c.target).and_then(Kind::of_table) else { continue };
+        let Some(kind) = t.col_named(name).filter(|c| c.ty() == "ref").and_then(|c| c.target).and_then(kind_of_table) else { continue };
         match cond {
             Json::String(_) => *cond = resolve_one(cond, kind, name, look)?,
             Json::Object(ops) => {

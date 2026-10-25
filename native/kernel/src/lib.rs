@@ -34,6 +34,7 @@ pub mod outreach;
 pub mod pick;
 pub mod pipeline;
 pub mod query;
+pub mod refs;
 pub mod rows;
 pub mod score;
 pub mod text;

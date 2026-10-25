@@ -29,6 +29,7 @@ use serde_json::{json, Value as Json};
 
 use crate::fire::{self, Cvs, Ranges};
 use crate::outreach::{Direction, Filing, Item, Kind};
+use crate::refs;
 use crate::pipeline::Stage;
 use crate::rows::Rows;
 use crate::Day;
@@ -595,7 +596,7 @@ pub fn step(f: &Facts) -> Step {
     let mut b = Build { said: Vec::new() };
     // 13: closed, or held by the operator.
     if f.stage == Stage::Closed {
-        b.ok("closed", alloc::format!("app:{} · {}({})", f.no, if f.out() { "sent" } else { "unsent" }, f.outcome.unwrap_or("closed")));
+        b.ok("closed", alloc::format!("{} · {}({})", app_ref(f), if f.out() { "sent" } else { "unsent" }, f.outcome.unwrap_or("closed")));
         return b.at(Phase::Close, Next::Done(f.outcome));
     }
     if f.status != "open" {
@@ -662,8 +663,8 @@ fn qualify(f: &Facts, b: &mut Build) -> Option<(Phase, Next)> {
         match f.freshness {
             None => return q(Next::Do(Act::Freshness)),
             Some(Fresh::Closed) => return Some((Phase::Close, Next::Do(Act::Close("expired")))),
-            Some(Fresh::Thin) => b.warn("thin", alloc::format!("app:{} reads thin: check the posting is still open before anything goes out", f.no)),
-            Some(Fresh::Blocked) => b.warn("blocked", alloc::format!("app:{}'s posting cannot be read: check it by hand before anything goes out", f.no)),
+            Some(Fresh::Thin) => b.warn("thin", alloc::format!("{} reads thin: check the posting is still open before anything goes out", app_ref(f))),
+            Some(Fresh::Blocked) => b.warn("blocked", alloc::format!("{}'s posting cannot be read: check it by hand before anything goes out", app_ref(f))),
             Some(Fresh::Open) => {}
         }
         if f.stage < Stage::Freshness {
@@ -725,7 +726,7 @@ fn shots(f: &Facts, b: &mut Build, list: &[(Want, Option<&Mission>)]) -> Option<
     for (w, m) in list {
         let Some(m) = m else { return Some((P::Stage, Next::Do(Act::Want(w.clone())))) };
         if m.kind == Kind::LinkedIn && m.draft_len > NOTE_MAX && matches!(m.state, MState::Draft | MState::DraftReady | MState::FireReady) {
-            b.warn("length", alloc::format!("mission:{} is {}/{NOTE_MAX} chars; LinkedIn cuts a connection note at {NOTE_MAX}", m.id, m.draft_len));
+            b.warn("length", alloc::format!("{} is {}/{NOTE_MAX} chars; LinkedIn cuts a connection note at {NOTE_MAX}", refs::mission(m.id), m.draft_len));
         }
         // A form takes the CV as a file, and so does a first mail (the put
         // refuses its fire_ready without one), whatever the rail did.
@@ -778,7 +779,7 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
         return (P::Fire, Next::Ask(Ask::ByHand(m.id)));
     }
     if let Some(e) = &m.last_error {
-        b.warn("failed", alloc::format!("mission:{} failed last time ({e}); the key still covers it: fire it again", m.id));
+        b.warn("failed", alloc::format!("{} failed last time ({e}); the key still covers it: fire it again", refs::mission(m.id)));
     }
     // The heat governor judges an application's first shot as it judges going out: the wait comes first.
     if let Some(until) = f.heat.filter(|_| !f.out()) {
@@ -813,7 +814,7 @@ fn within(phase: Phase, of: Phase) -> Phase {
 fn reply(f: &Facts, b: &mut Build) -> Option<(Phase, Next)> {
     let answered = |r: &Reply| f.missions.iter().any(|m| m.answers == Some(r.id) && m.state == MState::Fired);
     let r = f.replies.iter().filter(|r| !r.seen && !answered(r)).max_by_key(|r| (r.at, r.id))?;
-    b.ok("filed", alloc::format!("outreach:{} → app:{} reads as: {}", r.id, f.no, r.reads.name()));
+    b.ok("filed", alloc::format!("{} → {} reads as: {}", refs::outreach(r.id), app_ref(f), r.reads.name()));
     if r.reads == Reads::AutoReply {
         return Some((Phase::Reply, Next::Do(Act::Ignore(r.id))));
     }
@@ -842,7 +843,7 @@ fn reply(f: &Facts, b: &mut Build) -> Option<(Phase, Next)> {
 /// ghosted on day 30.
 fn timers(f: &Facts, mut b: Build) -> Step {
     if let Some(m) = f.mission(Role::Primary).filter(|m| m.provisional && m.fired.is_some_and(|t| f.now - t > CONFIRM_HOURS * 3600)) {
-        b.warn("unconfirmed", alloc::format!("mission:{} landed {} h ago and no confirmation mail is filed; check spam, or the page's reference stands", m.id, (f.now - m.fired.unwrap_or(f.now)) / 3600));
+        b.warn("unconfirmed", alloc::format!("{} landed {} h ago and no confirmation mail is filed; check spam, or the page's reference stands", refs::mission(m.id), (f.now - m.fired.unwrap_or(f.now)) / 3600));
     }
     if let Some(m) = f.live().find(|m| m.role == Role::Nudge && m.state != MState::Fired)
         && let Some((phase, next)) = shots(f, &mut b, &[(want_of(m), Some(m))])
@@ -885,13 +886,13 @@ fn route_line(f: &Facts, wants: &[Want]) -> String {
         };
         parts.push(what);
     }
-    alloc::format!("app:{} → {}", f.no, parts.join(" + "))
+    alloc::format!("{} → {}", app_ref(f), parts.join(" + "))
 }
 
 // ------------------------------------------------------------------ the answer
 
 fn app_ref(f: &Facts) -> String {
-    alloc::format!("app:{}", f.no)
+    refs::app(f.no)
 }
 
 fn iso(d: Day) -> String {
@@ -938,13 +939,13 @@ fn call(f: &Facts, act: &Act) -> (&'static str, Json, String) {
             alloc::format!("no route to apply at {}: find its careers form or a person to write to", f.company),
         ),
         Act::Want(w) => ("put", mission_args(f, w), want_why(f, w)),
-        Act::Ready(m) => ("put", json!({"ref": alloc::format!("mission:{m}"), "set": {"state": "fire_ready"}}), "fire_ready freezes what the key will fire".into()),
+        Act::Ready(m) => ("put", json!({"ref": refs::mission(m), "set": {"state": "fire_ready"}}), "fire_ready freezes what the key will fire".into()),
         Act::Mend(m, hold) => {
             let set = match *hold {
                 "recipients" => json!({"cc": "<fewer addresses: 10 in To and Cc together>"}),
                 _ => json!({"draft": "<the full draft>", "target": "<its route>"}),
             };
-            ("put", json!({"ref": alloc::format!("mission:{m}"), "set": set}), alloc::format!("mission:{m} cannot fire yet ({hold}): complete it"))
+            ("put", json!({"ref": refs::mission(m), "set": set}), alloc::format!("{} cannot fire yet ({hold}): complete it", refs::mission(m)))
         }
         Act::Request(ids) => {
             let range = Ranges::of(ids.iter().copied()).text();
@@ -962,19 +963,19 @@ fn call(f: &Facts, act: &Act) -> (&'static str, Json, String) {
                 Kind::CareersPage => "fill and submit the form once, then report",
                 _ => "send it once, then report",
             };
-            ("fire", json!({"ref": alloc::format!("mission:{mission}"), "key": key}), alloc::format!("lease {app} first; {how}"))
+            ("fire", json!({"ref": refs::mission(mission), "key": key}), alloc::format!("lease {app} first; {how}"))
         }
         Act::Report(m) => {
             let kind = f.missions.iter().find(|x| x.id == *m).map_or(Kind::Other, |x| x.kind);
             let args = match kind {
-                Kind::CareersPage => json!({"mission": alloc::format!("mission:{m}"), "reference": "<the page's confirmation number>", "fields": {"<field>": "<what you entered>"}, "report": "<what happened, markdown>"}),
-                _ => json!({"mission": alloc::format!("mission:{m}"), "body": "<the text you sent>", "link": "<the conversation>", "report": "<what happened, markdown>"}),
+                Kind::CareersPage => json!({"mission": refs::mission(m), "reference": "<the page's confirmation number>", "fields": {"<field>": "<what you entered>"}, "report": "<what happened, markdown>"}),
+                _ => json!({"mission": refs::mission(m), "body": "<the text you sent>", "link": "<the conversation>", "report": "<what happened, markdown>"}),
             };
             ("report", args, "the shot is in flight: report how it went (outcome failed with the reason if it did not go)".into())
         }
-        Act::Cancel(m) => ("put", json!({"ref": alloc::format!("mission:{m}"), "set": {"state": "cancelled"}}), alloc::format!("mission:{m}'s address bounced: cancel it and route again without it")),
-        Act::Ignore(r) => ("ignore", json!({"ref": alloc::format!("outreach:{r}")}), "an automatic reply: file it as ignored; the timers keep running".into()),
-        Act::Seen(r) => ("put", json!({"ref": alloc::format!("outreach:{r}"), "set": {"seen": true}}), "the reply is answered: mark it seen".into()),
+        Act::Cancel(m) => ("put", json!({"ref": refs::mission(m), "set": {"state": "cancelled"}}), alloc::format!("{}'s address bounced: cancel it and route again without it", refs::mission(m))),
+        Act::Ignore(r) => ("ignore", json!({"ref": refs::outreach(r)}), "an automatic reply: file it as ignored; the timers keep running".into()),
+        Act::Seen(r) => ("put", json!({"ref": refs::outreach(r), "set": {"seen": true}}), "the reply is answered: mark it seen".into()),
     }
 }
 
@@ -989,11 +990,11 @@ fn mission_args(f: &Facts, w: &Want) -> Json {
         To::Address { addr, contact, reply } => {
             a["to"] = json!(addr);
             if let Some(c) = contact {
-                a["contact"] = json!(alloc::format!("contact:{c}"));
+                a["contact"] = json!(refs::contact(c));
             }
             match (*reply, w.role) {
                 (Some(r), _) | (_, Role::Reply(r)) => {
-                    a["in_reply_to"] = json!(alloc::format!("outreach:{r}"));
+                    a["in_reply_to"] = json!(refs::outreach(r));
                     a["subject"] = json!(f.replies.iter().find(|x| x.id == r).map_or_else(|| "Re: ".to_string(), |x| if x.subject.to_ascii_lowercase().starts_with("re:") { x.subject.clone() } else { alloc::format!("Re: {}", x.subject) }));
                 }
                 (None, Role::Nudge) => {
@@ -1011,7 +1012,7 @@ fn mission_args(f: &Facts, w: &Want) -> Json {
             });
         }
         To::Profile(c) => {
-            a["contact"] = json!(alloc::format!("contact:{c}"));
+            a["contact"] = json!(refs::contact(c));
             a["draft"] = json!(alloc::format!("<Hey {{first}}! I'm {{me}}, {{short intro}}, {{prior work}}. Just applied to {} at {}. (≤{NOTE_MAX} chars)>", f.role, f.company));
         }
     }
@@ -1042,19 +1043,19 @@ fn ask_text(f: &Facts, a: &Ask) -> (String, String) {
         }
         Ask::Key(r) => (alloc::format!("approve the fire key for {app}: /fire/{r}"), "only the operator makes a fire key; stop here until it is granted"),
         Ask::Revoked(m) => (alloc::format!("the operator revoked the key for mission:{m}: stand down; ask them whether it goes out at all before requesting another"), "a revoked key is the operator's decision; nothing requests it again on its own"),
-        Ask::Declined(r) => (alloc::format!("fire_request:{r} was declined: revise the drafts, then ask the user before requesting again"), "the operator said no to these drafts; only they can say what changed"),
+        Ask::Declined(r) => (alloc::format!("{} was declined: revise the drafts, then ask the user before requesting again", refs::request(r)), "the operator said no to these drafts; only they can say what changed"),
         Ask::Mailbox => ("link Gmail (Account → Mail) so the mail can go".into(), "no live mailbox"),
         Ask::ByHand(m) => {
             let m = f.missions.iter().find(|x| x.id == *m);
             let (id, target, error) = (m.map_or(0, |m| m.id), m.map_or("", |m| m.target.as_str()), m.and_then(|m| m.last_error.as_deref()).unwrap_or("failed"));
             (
-                alloc::format!("mission:{id} failed ({error}): send it by hand{}, then say so", if target.is_empty() { String::new() } else { alloc::format!(" at {target}") }),
+                alloc::format!("{} failed ({error}): send it by hand{}, then say so", refs::mission(id), if target.is_empty() { String::new() } else { alloc::format!(" at {target}") }),
                 "a wall the agent cannot pass; once it is sent, fire it under its key and report it landed with what was sent",
             )
         }
-        Ask::Sender(r) => (alloc::format!("outreach:{r} leaves no live address or contact to answer through: link its sender's contact, or mark it seen once answered by hand"), "hireme cannot reach the sender"),
-        Ask::Assessment(r) => (alloc::format!("outreach:{r} is an assessment for {app}: take it (then mark it seen) or decline (close {app} withdrawn)?"), "the operator's own work"),
-        Ask::Offer(r) => (alloc::format!("outreach:{r} reads as an offer for {app}: accept (close it offer) or decline (close it declined)?"), "the operator's decision"),
+        Ask::Sender(r) => (alloc::format!("{} leaves no live address or contact to answer through: link its sender's contact, or mark it seen once answered by hand", refs::outreach(r)), "hireme cannot reach the sender"),
+        Ask::Assessment(r) => (alloc::format!("{} is an assessment for {app}: take it (then mark it seen) or decline (close {app} withdrawn)?", refs::outreach(r)), "the operator's own work"),
+        Ask::Offer(r) => (alloc::format!("{} reads as an offer for {app}: accept (close it offer) or decline (close it declined)?", refs::outreach(r)), "the operator's decision"),
     };
     (ask, why.into())
 }
