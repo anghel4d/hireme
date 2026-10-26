@@ -1009,5 +1009,9 @@ table mailboxes mail resident singleton
   col folder str ? server_only
   col uidvalidity u32 ? server_only
   col last_uid u32 ? server_only
+  # The first sync's progress, so linking a large mailbox reads as work, not
+  # a hang: messages walked of those its window listed; cleared once live.
+  col sync_done u32 ? readonly
+  col sync_total u32 ? readonly
   command mailbox_state status last_error? last_sync_at?
   command unlink_mail human_only

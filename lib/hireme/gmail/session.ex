@@ -63,6 +63,8 @@ defmodule Hireme.Gmail.Session do
     # The highest All Mail UID the last sync listed, kept or held, and the
     # next UID All Mail had when it was selected.
     :listed,
+    # The walk's {done, total} while the mailbox is not live yet (listing/2, walked/2).
+    :progress,
     :uidnext,
     :noted,
     :renew,
@@ -320,7 +322,7 @@ defmodule Hireme.Gmail.Session do
 
     case found do
       {:ok, uids, imap} ->
-        walk(%{s | imap: imap, listed: Enum.max(uids, fn -> s.listed end)}, uids)
+        walk(listing(%{s | imap: imap, listed: Enum.max(uids, fn -> s.listed end)}, uids), uids)
 
       {:error, why} ->
         {:error, why, %{s | imap: nil}}
@@ -340,6 +342,8 @@ defmodule Hireme.Gmail.Session do
     with {:ok, envelopes, imap} <- Imap.envelopes(s.imap, batch),
          {:ok, kept, held, imap} <- keep(%{s | imap: imap}, Enum.sort_by(envelopes, & &1.uid)),
          {:ok, imap} <- Imap.label(imap, kept, "hireme") do
+      s = walked(s, batch)
+
       case held do
         nil -> walk(advance(%{s | imap: imap}, List.last(batch)), rest)
         # A mail the filer could not answer yet holds the walk before it.
@@ -523,7 +527,32 @@ defmodule Hireme.Gmail.Session do
     %{s | last_uid: uid}
   end
 
+  # Before the mailbox is live, the walk's progress is on the row, so the page
+  # shows a first sync of thousands of messages as work, not a hang. A listing
+  # sets the total (a retry after a drop keeps what was already walked); each
+  # batch walked adds to what is done.
+  defp listing(%{status: :live} = s, _), do: s
+  defp listing(s, []), do: s
+
+  defp listing(s, uids) do
+    {done, _} = s.progress || {0, 0}
+    total = done + length(uids)
+    server(s, %{sync_done: done, sync_total: total})
+    %{s | progress: {done, total}}
+  end
+
+  defp walked(%{progress: {done, total}} = s, batch) do
+    done = min(done + length(batch), total)
+    server(s, %{sync_done: done})
+    %{s | progress: {done, total}}
+  end
+
+  defp walked(s, _), do: s
+
   defp noted(s) do
+    if s.progress, do: server(s, %{sync_done: nil, sync_total: nil})
+    s = %{s | progress: nil}
+
     if s.status != :live or s.noted == nil or now() - s.noted > @note_ms do
       state(s, :live, nil, %{last_sync_at: DateTime.utc_now()})
       %{s | status: :live, noted: now()}

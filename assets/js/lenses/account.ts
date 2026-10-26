@@ -187,6 +187,8 @@ function mail(): Html {
   const status = str(m?.status) || "unlinked"
   const linked = m !== null && status !== "unlinked"
   const tag = { live: html`<span class="tag ok">linked</span>`, linking: html`<span class="tag">linking…</span>`, auth_failed: html`<span class="tag bad">password refused</span>`, error: html`<span class="tag warn">retrying</span>` }[status] ?? EMPTY
+  // A first sync of a large mailbox takes minutes: its progress, until it is live (or retrying).
+  const sync = status !== "live" && m?.sync_total ? html` <span class="muted">first sync: ${num(m.sync_done).toLocaleString("en")} of ${num(m.sync_total).toLocaleString("en")} messages</span>` : EMPTY
   const form = html`<form class="stack" data-submit="mail-link" data-act="mail-link" data-key="mail-form">
       <label>Gmail address <input name="address" type="email" required autocomplete="email" value="${mailAddress || str(m?.address)}"></label>
       <label>App password <input name="app_password" type="password" required autocomplete="off" spellcheck="false" minlength="16" maxlength="24"></label>
@@ -194,7 +196,7 @@ function mail(): Html {
       <span class="row"><button class="primary">Link</button><button type="button" class="ghost" data-act="close">Cancel</button></span></form>`
   return html`<section class="card" data-key="mail"><h2>Mail</h2>
     ${linked
-      ? html`<p><b>${str(m!.address)}</b> ${tag}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
+      ? html`<p><b>${str(m!.address)}</b> ${tag}${sync}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
         ${status === "auth_failed" ? html`<p class="error">${str(m!.last_error) || MAIL_ERR.auth} Link it again with a new app password.</p>` : status === "error" && m!.last_error ? html`<p class="muted">${MAIL_ERR[str(m!.last_error)] ?? str(m!.last_error)}; retrying.</p>` : EMPTY}
         <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" data-act="mail-check">Send a test mail</button><button type="button" class="ghost" data-act="mail-pipe">Domain pipe secret</button><button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
       : html`<p class="muted">Link your Gmail: replies to your applications file themselves here, and mail sent from hireme sits in Gmail's Sent. hireme reads only the job search's mail, labels it hireme, and never moves, archives or deletes anything.</p>`}
