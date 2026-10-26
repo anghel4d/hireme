@@ -14,10 +14,20 @@ Applies to `anghel4d.com`, `anoptic.io`, `broadside.tech` and
 | --- | --- |
 | SPF (three apexes) | `v=spf1 include:_spf.mx.cloudflare.net -all` |
 | SPF (`cf-bounce.*`) | `~all`, Cloudflare-owned: it carries Email Sending's Return-Path |
-| DKIM | `cf2024-1._domainkey`, RSA 2048; `cf-bounce._domainkey` beside it |
+| DKIM | selector `cf2024-1` (RSA 2048) for each From domain; selector `cf-bounce` beside it, which is what Email Sending signs with |
 | DMARC | `p=reject` on the apexes and on `hireme.anghel4d.com` |
-| DMARC reporting | Cloudflare DMARC Management on all three zones: `rua=mailto:<prefix>@dmarc-reports.cloudflare.net` |
+| DMARC reporting | Cloudflare DMARC Management on all three zones: `rua=mailto:<prefix>@dmarc-reports.cloudflare.net` on each apex and on `hireme.anghel4d.com` |
 | MX | `route{1,2,3}.mx.cloudflare.net`, catch-all forwards to `matei3d@gmail.com` |
+
+`hireme.anghel4d.com` carries its own `_dmarc` record rather than inheriting the
+apex's, because hireme's mail is `From: signin@hireme.anghel4d.com` (the
+`MAIL_FROM` in its agenix `hireme-env`). A record at the subdomain overrides the
+organizational domain, so it needs the `rua` spelled out itself or its reports
+are dropped; it now carries the zone's Cloudflare `rua`, the same one the apex
+has. Its DKIM is `cf-bounce._domainkey.hireme.anghel4d.com`, which is selector
+`cf-bounce` for `d=hireme.anghel4d.com` — strictly aligned with that From.
+Nothing needs an SPF record at the subdomain: the envelope is
+`something@cf-bounce.hireme.anghel4d.com`, which has its own.
 
 `-all` is safe because Cloudflare is the only path that sends with an envelope
 from these domains; nothing else in the estate runs an MTA
