@@ -229,6 +229,20 @@ defmodule HiremeWeb.McpTest do
     assert length(found["result"]["structuredContent"]["rows"]) == 500
   end
 
+  test "mail_check is listed for a key that reads the mailbox, and refuses with the reason when nothing is linked",
+       ctx do
+    {:ok, %{secret: secret}} = Keys.mint(ctx.session, "mail", Keys.preset(:read_write))
+    p = %{url: ctx.url, secret: secret, sid: nil, peer: nil}
+
+    listed = ok!(call(p, "tools/list", %{}))
+    names = for t <- listed["result"]["tools"], do: t["name"]
+    assert "mail_check" in names
+
+    # Nothing linked yet: the node's own refusal, not a send.
+    refused = call(p, "tools/call", %{name: "mail_check", arguments: %{}})
+    assert text_of(refused) =~ "not_linked"
+  end
+
   test "without a session id a key's requests share its default session, lease included; a session deleted or lost is served anew under its id, its lease gone",
        ctx do
     {:ok, %{secret: secret}} = Keys.mint(ctx.session, "default", Keys.preset(:read_write))

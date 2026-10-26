@@ -301,7 +301,7 @@ defmodule Hireme.FakeGmail do
   defp accept(server, listener, proto, tls, opts) do
     case accept_one(proto, listener, tls) do
       {:ok, socket} ->
-        pid = spawn(fn -> connection(server, proto, tls, opts) end)
+        pid = spawn(fn -> connection(server, proto, tls) end)
         _ = controlling(proto, tls, socket, pid)
         send(pid, {:socket, socket, opts})
         accept(server, listener, proto, tls, opts)
@@ -599,7 +599,7 @@ defmodule Hireme.FakeGmail do
 
   ## Connections
 
-  defp connection(server, proto, tls, opts) do
+  defp connection(server, proto, tls) do
     receive do
       {:socket, socket, opts} ->
         c = %{sock: socket, server: server, buf: "", kind: kind(proto, tls), tls: opts}

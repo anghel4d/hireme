@@ -644,7 +644,8 @@ fn step_term<'a>(env: Env<'a>, step: Step) -> NifResult<Term<'a>> {
 
 /// An effect's outcome as the Elixir session reports it (JSON): `{"waited": true}`,
 /// `{"submitted": {"verdicts": [{"ack": [rev, id]} | {"nack": [code, data]} | null], "atomic": bool}}`,
-/// `{"claimed" | "released": {"ok": reply} | {"error": error}}` or `{"blob": {"ok": sha} | {"error": why}}`.
+/// `{"claimed" | "released" | "checked": {"ok": reply} | {"error": error}}` or
+/// `{"blob": {"ok": sha} | {"error": why}}`.
 fn outcome(o: &Json) -> NifResult<Outcome> {
     let rpc = |v: &Json| match (v.get("ok"), v.get("error")) {
         (Some(ok), _) => Ok(Ok(ok.clone())),
@@ -664,10 +665,11 @@ fn outcome(o: &Json) -> NifResult<Outcome> {
             .collect();
         return Ok(Outcome::Submitted(Submitted { verdicts, lost: None, atomic: s["atomic"] == true }));
     }
-    Ok(match (o.get("claimed"), o.get("released"), o.get("blob")) {
-        (Some(c), _, _) => Outcome::Claimed(rpc(c)),
-        (_, Some(r), _) => Outcome::Released(rpc(r)),
-        (_, _, Some(b)) => Outcome::Blob(match (b["ok"].as_str(), b["error"].as_str()) {
+    Ok(match (o.get("claimed"), o.get("released"), o.get("blob"), o.get("checked")) {
+        (Some(c), _, _, _) => Outcome::Claimed(rpc(c)),
+        (_, Some(r), _, _) => Outcome::Released(rpc(r)),
+        (_, _, _, Some(c)) => Outcome::Checked(rpc(c)),
+        (_, _, Some(b), _) => Outcome::Blob(match (b["ok"].as_str(), b["error"].as_str()) {
             (Some(sha), _) => Ok(sha.to_owned()),
             (_, why) => Err(why.unwrap_or("the upload failed").to_owned()),
         }),
