@@ -644,8 +644,20 @@ defmodule Hireme.Gmail do
 
     case which do
       :imap -> Keyword.get(conf, :imap, {"imap.gmail.com", 993})
-      :smtp -> Keyword.get(conf, :smtp, {"smtp.gmail.com", 465})
+      :smtp -> Keyword.get(conf, :smtp, {"smtp.gmail.com", 587})
     end
+  end
+
+  @doc """
+  How the endpoint is secured: implicit TLS on 465, STARTTLS on 587 (the
+  default, since fsn1-2 cannot reach 465). `:smtp_tls` in the config overrides.
+  """
+  @spec endpoint_tls(:imap | :smtp) :: :implicit | :starttls
+  def endpoint_tls(:smtp) do
+    conf = Application.get_env(:hireme, __MODULE__, [])
+    {_host, port} = endpoint(:smtp)
+
+    Keyword.get(conf, :smtp_tls) || if(port == 465, do: :implicit, else: :starttls)
   end
 
   @doc false

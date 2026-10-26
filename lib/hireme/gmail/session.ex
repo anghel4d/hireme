@@ -603,7 +603,7 @@ defmodule Hireme.Gmail.Session do
       # From here the mail may reach Gmail.
       s = %{s | tried: Map.put(s.tried, m.id, now())}
       {host, port} = Gmail.endpoint(:smtp)
-      at = %{host: host, port: port, cacerts: Gmail.cacerts()}
+      at = %{host: host, port: port, cacerts: Gmail.cacerts(), tls: Gmail.endpoint_tls(:smtp)}
 
       case Smtp.deliver(at, s.address, password, s.address, rcpts, Smtp.compose(mail)) do
         {:ok, _} ->

@@ -169,8 +169,10 @@
             environment.etc."hireme/mcp-replay.py".source = ./nix/mcp-replay.py;
             environment.etc."hireme/mail-check.py".source = ./nix/mail-check.py;
             environment.etc."hireme/mail-check.exs".source = ./nix/mail-check.exs;
-            # A fake Gmail (IMAP 993, SMTP 465, Gmail's X-GM extensions) driven
-            # through its spool: test/support/fake_gmail.ex, standalone.
+            # A fake Gmail (IMAP 993, SMTP 587 STARTTLS — the port the estate
+            # sends on, since fsn1-2 has no route to 465 — Gmail's X-GM
+            # extensions) driven through its spool: test/support/fake_gmail.ex,
+            # standalone.
             systemd.services.fake-gmail = {
               wantedBy = [ "multi-user.target" ];
               before = [ "hireme.service" ];
@@ -179,7 +181,7 @@
               script = ''
                 exec ${beamPackages.elixir}/bin/elixir -r ${./test/support/fake_gmail.ex} \
                   -e 'Hireme.FakeGmail.main(System.argv())' -- \
-                  --imap-port 993 --smtp-port 465 --ip 127.0.0.1 \
+                  --imap-port 993 --smtp-port 587 --ip 127.0.0.1 \
                   --cert ${mailTestCerts}/gmail.pem --key ${mailTestCerts}/gmail.key \
                   --user check@gmail.com --password abcdefghijklmnop --spool /var/lib/fake-gmail
               '';
@@ -296,7 +298,7 @@
 
               machine.wait_for_unit("fake-gmail.service")
               machine.wait_for_open_port(993)
-              machine.wait_for_open_port(465)
+              machine.wait_for_open_port(587)
 
               seed = op("seed()")
               key, reply, changed, unsettled, app, other = seed["agent_key"], seed["reply"], seed["changed"], seed["unsettled"], seed["app"], seed["other"]

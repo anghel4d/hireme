@@ -2,10 +2,13 @@ defmodule Hireme.Gmail.Smtp do
   @moduledoc """
   One message through Gmail's SMTP submission, and its composition.
 
-  Delivery: implicit TLS (as `Hireme.Gmail.Imap.tls/2` verifies it), EHLO,
-  AUTH PLAIN with the app password, one envelope, DATA, QUIT. Gmail files
-  what it accepts in the account's Sent, so the thread lives in the
-  operator's own mailbox as if sent from Gmail itself.
+  Delivery: TLS up to the endpoint's `:tls` — implicit on 465, or a plain
+  connection upgraded with STARTTLS everywhere else (587, the default, because
+  fsn1-2 has no route to 465: `docs/mail/deliverability.md`) — verified as
+  `Hireme.Gmail.Imap.tls/2` verifies it, then EHLO, AUTH PLAIN with the app
+  password, one envelope, DATA, QUIT. Gmail files what it accepts in the
+  account's Sent, so the thread lives in the operator's own mailbox as if sent
+  from Gmail itself.
 
   Composition: RFC 5322 with MIME. The body is UTF-8 quoted-printable, any
   non-ASCII header text RFC 2047 encoded words, an attachment a base64
@@ -40,16 +43,63 @@ defmodule Hireme.Gmail.Smtp do
           {:ok, String.t()} | {:error, error}
   def deliver(%{host: host, port: port, cacerts: cacerts} = at, user, password, from, rcpts, data)
       when length(rcpts) in 1..@max_rcpts do
-    timeout = Map.get(at, :timeout, 60_000)
+    s = %{
+      socket: nil,
+      kind: nil,
+      tls: Map.get(at, :tls) || tls(port),
+      host: host,
+      port: port,
+      cacerts: cacerts,
+      buf: "",
+      timeout: Map.get(at, :timeout, 60_000)
+    }
 
-    case :ssl.connect(String.to_charlist(host), port, Imap.tls(host, cacerts), timeout) do
-      {:ok, socket} ->
-        s = %{socket: socket, buf: "", timeout: timeout}
-
+    case open(s) do
+      {:ok, s} ->
         try do
           session(s, user, password, from, rcpts, data)
         after
-          :ssl.close(socket)
+          close(s)
+        end
+
+      error ->
+        error
+    end
+  end
+
+  def deliver(_at, _user, _password, _from, rcpts, _data),
+    do: {:error, {:permanent, "#{length(rcpts)} recipients: 1 to #{@max_rcpts}"}}
+
+  # 465 opens on TLS; 587 opens in the clear and is upgraded with STARTTLS,
+  # which is the only one of the two this host can reach.
+  defp tls(465), do: :implicit
+  defp tls(_port), do: :starttls
+
+  # The greeting read and EHLO answered, the socket TLS where the endpoint is.
+  defp open(%{tls: :implicit, host: host, port: port, cacerts: cacerts, timeout: timeout} = s) do
+    case :ssl.connect(String.to_charlist(host), port, Imap.tls(host, cacerts), timeout) do
+      {:ok, socket} -> hello(%{s | socket: socket, kind: :ssl})
+      {:error, reason} -> {:error, {:network, reason}}
+    end
+  end
+
+  defp open(%{tls: :starttls, host: host, port: port, timeout: timeout} = s) do
+    case :gen_tcp.connect(
+           String.to_charlist(host),
+           port,
+           [:binary, active: false, packet: :raw],
+           timeout
+         ) do
+      {:ok, socket} ->
+        s = %{s | socket: socket, kind: :tcp}
+
+        with {:ok, _, s} <- expect(s, nil, 220),
+             {:ok, _, s} <- expect(s, "EHLO hireme", 250),
+             {:ok, _, s} <- expect(s, "STARTTLS", 220),
+             :ok <- empty(s),
+             {:ok, socket} <- upgrade(s, timeout) do
+          # RFC 3207: what EHLO said before the handshake is forgotten.
+          hello(%{s | socket: socket, kind: :ssl, buf: ""})
         end
 
       {:error, reason} ->
@@ -57,15 +107,29 @@ defmodule Hireme.Gmail.Smtp do
     end
   end
 
-  def deliver(_at, _user, _password, _from, rcpts, _data),
-    do: {:error, {:permanent, "#{length(rcpts)} recipients: 1 to #{@max_rcpts}"}}
+  defp hello(s) do
+    case expect(s, "EHLO hireme", 250) do
+      {:ok, _, s} -> {:ok, s}
+      error -> error
+    end
+  end
+
+  # STARTTLS: the plain socket becomes TLS, verified as Imap.tls/2 says.
+  defp upgrade(%{socket: socket, host: host, cacerts: cacerts}, timeout) do
+    case :ssl.connect(socket, Imap.tls(host, cacerts), timeout) do
+      {:ok, ssl} -> {:ok, ssl}
+      {:error, reason} -> {:error, {:network, reason}}
+    end
+  end
+
+  # Nothing may follow STARTTLS's 220: the next bytes are the handshake.
+  defp empty(%{buf: ""}), do: :ok
+  defp empty(_s), do: {:error, {:network, :starttls}}
 
   defp session(s, user, password, from, rcpts, data) do
     plain = Base.encode64(<<0, user::binary, 0, password::binary>>)
 
-    with {:ok, _, s} <- expect(s, nil, 220),
-         {:ok, _, s} <- expect(s, "EHLO hireme", 250),
-         {:ok, _, s} <- expect(s, ["AUTH PLAIN ", plain], 235, :auth),
+    with {:ok, _, s} <- expect(s, ["AUTH PLAIN ", plain], 235, :auth),
          {:ok, _, s} <- expect(s, ["MAIL FROM:<", from, ">"], 250),
          {:ok, s} <- recipients(s, rcpts),
          {:ok, _, s} <- expect(s, "DATA", 354),
@@ -112,11 +176,21 @@ defmodule Hireme.Gmail.Smtp do
   defp put(_s, nil), do: :ok
 
   defp put(s, line) do
-    case :ssl.send(s.socket, [line, "\r\n"]) do
+    case transmit(s, [line, "\r\n"]) do
       :ok -> :ok
       {:error, reason} -> {:error, {:network, reason}}
     end
   end
+
+  defp transmit(%{kind: :ssl, socket: socket}, data), do: :ssl.send(socket, data)
+  defp transmit(%{kind: :tcp, socket: socket}, data), do: :gen_tcp.send(socket, data)
+
+  defp recv(%{kind: :ssl, socket: socket}, timeout), do: :ssl.recv(socket, 0, timeout)
+  defp recv(%{kind: :tcp, socket: socket}, timeout), do: :gen_tcp.recv(socket, 0, timeout)
+
+  defp close(%{kind: :ssl, socket: socket}) when socket != nil, do: :ssl.close(socket)
+  defp close(%{kind: :tcp, socket: socket}) when socket != nil, do: :gen_tcp.close(socket)
+  defp close(_s), do: :ok
 
   # A reply, its continuation lines (250-...) joined.
   defp reply(s, acc) do
@@ -153,7 +227,7 @@ defmodule Hireme.Gmail.Smtp do
         {:error, {:network, :reply}}
 
       [_] ->
-        case :ssl.recv(s.socket, 0, s.timeout) do
+        case recv(s, s.timeout) do
           {:ok, data} -> line(%{s | buf: s.buf <> data})
           {:error, reason} -> {:error, {:network, reason}}
         end

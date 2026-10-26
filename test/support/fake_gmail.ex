@@ -207,6 +207,7 @@ defmodule Hireme.FakeGmail do
       uidvalidity: Keyword.get(opts, :uidvalidity, 1),
       imap_port: Keyword.get(opts, :imap_port, 0),
       smtp_port: Keyword.get(opts, :smtp_port, 0),
+      smtp_tls: Keyword.get(opts, :smtp_tls, :starttls),
       ssl: [:binary, active: false, reuseaddr: true, ip: ip, versions: [:"tlsv1.3", :"tlsv1.2"]],
       cacerts: cacerts,
       spool: opts[:spool],
@@ -249,38 +250,84 @@ defmodule Hireme.FakeGmail do
     do: {[certfile: to_charlist(files[:certfile]), keyfile: to_charlist(files[:keyfile])], []}
 
   defp listen(s) do
-    with {:ok, imap} <- :ssl.listen(s.imap_port, s.ssl) do
-      case :ssl.listen(s.smtp_port, s.ssl) do
-        {:ok, smtp} ->
-          me = self()
-          listeners = [imap: imap, smtp: smtp]
-          for {proto, l} <- listeners, do: spawn(fn -> accept(me, l, proto) end)
+    case :ssl.listen(s.imap_port, s.ssl) do
+      {:ok, imap} ->
+        case listen_smtp(s) do
+          {:ok, smtp, port} ->
+            {:ok, {_, imap_port}} = :ssl.sockname(imap)
+            me = self()
+            # What a handshake on an already-accepted socket takes: the listen
+            # options, less the two that describe a listener.
+            opts =
+              for o <- s.ssl,
+                  o not in [:binary] and (not is_tuple(o) or elem(o, 0) not in [:ip, :reuseaddr]),
+                  do: o
 
-          [imap_port, smtp_port] =
-            for {_, l} <- listeners, {:ok, {_, port}} <- [:ssl.sockname(l)], do: port
+            spawn(fn -> accept(me, imap, :imap, s.smtp_tls, opts) end)
+            spawn(fn -> accept(me, smtp, :smtp, s.smtp_tls, opts) end)
 
-          {:ok, %{s | imap_port: imap_port, smtp_port: smtp_port, listeners: [imap, smtp]}}
+            {:ok,
+             %{s | imap_port: imap_port, smtp_port: port, listeners: [imap: imap, smtp: smtp]}}
 
-        error ->
-          :ssl.close(imap)
-          error
-      end
+          error ->
+            :ssl.close(imap)
+            error
+        end
+
+      error ->
+        error
     end
+  end
+
+  # 465 is TLS from the first byte (the default for the whole estate's
+  # legacy port); anything else, 587 first, opens plain and is upgraded with
+  # STARTTLS — what `Hireme.Gmail.Smtp` does against the real Gmail.
+  defp listen_smtp(%{smtp_tls: :implicit} = s) do
+    with {:ok, listener} <- :ssl.listen(s.smtp_port, s.ssl),
+         {:ok, {_, port}} <- :ssl.sockname(listener),
+         do: {:ok, listener, port}
+  end
+
+  defp listen_smtp(%{smtp_tls: :starttls} = s) do
+    opts = [:binary, active: false, reuseaddr: true, packet: :raw, ip: s.ssl[:ip]]
+
+    with {:ok, listener} <- :gen_tcp.listen(s.smtp_port, opts),
+         {:ok, {_, port}} <- :inet.sockname(listener),
+         do: {:ok, listener, port}
   end
 
   # A closed listener ends its acceptor; so does any other error, rather
   # than spinning on it.
-  defp accept(server, listener, proto) do
-    with {:ok, socket} <- :ssl.transport_accept(listener) do
-      pid = spawn(fn -> connection(server, proto) end)
-      _ = :ssl.controlling_process(socket, pid)
-      send(pid, {:socket, socket})
-      accept(server, listener, proto)
+  defp accept(server, listener, proto, tls, opts) do
+    case accept_one(proto, listener, tls) do
+      {:ok, socket} ->
+        pid = spawn(fn -> connection(server, proto, tls, opts) end)
+        _ = controlling(proto, tls, socket, pid)
+        send(pid, {:socket, socket, opts})
+        accept(server, listener, proto, tls, opts)
+
+      error ->
+        error
     end
   end
 
+  defp accept_one(:smtp, listener, :starttls), do: :gen_tcp.accept(listener)
+  defp accept_one(_proto, listener, _tls), do: :ssl.transport_accept(listener)
+
+  defp controlling(:smtp, :starttls, socket, pid), do: :gen_tcp.controlling_process(socket, pid)
+  defp controlling(_proto, _tls, socket, pid), do: :ssl.controlling_process(socket, pid)
+
   defp close_all(s) do
-    Enum.each(s.listeners, &:ssl.close/1)
+    if s.listeners != [] do
+      Enum.each(s.listeners, fn
+        {:imap, listener} ->
+          :ssl.close(listener)
+
+        {:smtp, listener} ->
+          if s.smtp_tls == :implicit, do: :ssl.close(listener), else: :gen_tcp.close(listener)
+      end)
+    end
+
     Enum.each(Map.keys(s.conns), &Process.exit(&1, :kill))
     %{s | listeners: [], conns: %{}}
   end
@@ -552,20 +599,38 @@ defmodule Hireme.FakeGmail do
 
   ## Connections
 
-  defp connection(server, proto) do
+  defp connection(server, proto, tls, opts) do
     receive do
-      {:socket, socket} ->
+      {:socket, socket, opts} ->
+        c = %{sock: socket, server: server, buf: "", kind: kind(proto, tls), tls: opts}
+
         with :ok <- join(server, proto),
-             {:ok, socket} <- :ssl.handshake(socket, 15_000) do
-          c = %{sock: socket, server: server, peer: peer(socket), buf: ""}
+             {:ok, c} <- hello(c) do
           if proto == :imap, do: imap_session(c), else: smtp_session(c)
         else
-          _ -> :ssl.close(socket)
+          _ -> close(c)
         end
     after
       15_000 -> :ok
     end
   end
+
+  # Every listener but 587's SMTP starts with the handshake; that one waits
+  # for STARTTLS mid-conversation.
+  defp kind(:smtp, :starttls), do: :tcp
+  defp kind(_proto, _tls), do: :ssl
+
+  defp hello(%{kind: :ssl, sock: socket} = c) do
+    case :ssl.handshake(socket, c.tls, 15_000) do
+      {:ok, socket} -> {:ok, Map.merge(c, %{sock: socket, peer: peer(socket, :ssl)})}
+      _ -> :error
+    end
+  end
+
+  defp hello(%{kind: :tcp} = c), do: {:ok, Map.put(c, :peer, peer(c.sock, :tcp))}
+
+  defp close(%{kind: :ssl, sock: socket}), do: :ssl.close(socket)
+  defp close(%{kind: :tcp, sock: socket}), do: :gen_tcp.close(socket)
 
   defp join(server, proto) do
     GenServer.call(server, {:join, proto})
@@ -573,21 +638,35 @@ defmodule Hireme.FakeGmail do
     :exit, _ -> :down
   end
 
-  defp peer(socket) do
+  defp peer(socket, :ssl) do
     case :ssl.peername(socket) do
       {:ok, {ip, _port}} -> to_string(:inet.ntoa(ip))
       _ -> "127.0.0.1"
     end
   end
 
-  defp write(c, iodata), do: :ssl.send(c.sock, [iodata, "\r\n"])
+  defp peer(socket, :tcp) do
+    case :inet.peername(socket) do
+      {:ok, {ip, _port}} -> to_string(:inet.ntoa(ip))
+      _ -> "127.0.0.1"
+    end
+  end
+
+  defp write(%{kind: :ssl} = c, iodata), do: :ssl.send(c.sock, [iodata, "\r\n"])
+  defp write(%{kind: :tcp} = c, iodata), do: :gen_tcp.send(c.sock, [iodata, "\r\n"])
+
+  defp setopts(%{kind: :ssl, sock: sock}), do: :ssl.setopts(sock, active: :once)
+  defp setopts(%{kind: :tcp, sock: sock}), do: :inet.setopts(sock, active: :once)
 
   # A connection's loop: each CRLF-ended line goes to `line`, which answers
   # {:ok, c} or :stop; a change to the mailbox reaches an IDLE at once.
   defp loop(c, line) do
-    with :ok <- :ssl.setopts(c.sock, active: :once) do
+    with :ok <- setopts(c) do
       receive do
         {:ssl, _, data} ->
+          with {:ok, c} <- lines(%{c | buf: c.buf <> data}, line), do: loop(c, line)
+
+        {:tcp, _, data} ->
           with {:ok, c} <- lines(%{c | buf: c.buf <> data}, line), do: loop(c, line)
 
         {__MODULE__, :changed} ->
@@ -596,7 +675,13 @@ defmodule Hireme.FakeGmail do
         {:ssl_closed, _} ->
           :ok
 
+        {:tcp_closed, _} ->
+          :ok
+
         {:ssl_error, _, _} ->
+          :ok
+
+        {:tcp_error, _, _} ->
           :ok
       end
     end
@@ -1035,11 +1120,37 @@ defmodule Hireme.FakeGmail do
     write(c, [
       ["250-smtp.gmail.com at your service, [", c.peer, "]\r\n"],
       "250-SIZE 35882577\r\n250-8BITMIME\r\n",
+      if(c.kind == :tcp, do: "250-STARTTLS\r\n", else: ""),
       "250-AUTH LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH\r\n",
       "250-ENHANCEDSTATUSCODES\r\n250-PIPELINING\r\n250 SMTPUTF8"
     ])
 
     {:ok, %{c | greeted: true, from: nil, rcpts: []}}
+  end
+
+  # RFC 3207: the socket becomes TLS and what EHLO said is forgotten, so the
+  # next command must be EHLO again.
+  defp smtp_verb("STARTTLS", _arg, %{kind: :tcp} = c) do
+    write(c, "220 2.0.0 Ready to start TLS x - gsmtp")
+
+    case :ssl.handshake(c.sock, c.tls, 15_000) do
+      {:ok, socket} ->
+        {:ok,
+         %{
+           c
+           | sock: socket,
+             kind: :ssl,
+             buf: "",
+             peer: peer(socket, :ssl),
+             greeted: false,
+             authed: nil,
+             from: nil,
+             rcpts: []
+         }}
+
+      _ ->
+        :stop
+    end
   end
 
   defp smtp_verb("AUTH", "PLAIN " <> response, c) do
@@ -1075,7 +1186,7 @@ defmodule Hireme.FakeGmail do
 
   defp smtp_verb("QUIT", _arg, c) do
     write(c, "221 2.0.0 closing connection x - gsmtp")
-    :ssl.close(c.sock)
+    close(c)
     :stop
   end
 
