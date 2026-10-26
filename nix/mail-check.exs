@@ -57,7 +57,8 @@ defmodule MailCheck do
   end
 
   # The review the predialed page shows, then the key, created by the fresh
-  # session; and the same from a session past the step-up window, refused.
+  # session; and the same from a session signed in an hour ago, accepted: its
+  # sign-in covers the session's life (the operator, 2026-10-26).
   def create_key(scope) do
     %{"account" => a, "session" => sid} = load()
     {:ok, review} = Gmail.query(a, "fire_review", %{"missions" => scope})

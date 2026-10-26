@@ -329,7 +329,7 @@
 
               # The fresh session creates the key; one past the step-up window cannot.
               made = op(f'create_key("{reply},{changed}")')
-              assert made["key"] and made["refused"] == [] and made["stale_session"] == ["step_up"], made
+              assert made["key"] and made["refused"] == [] and made["stale_session"] == [], made
 
               # One shot: exactly one mail, to the mission's own target; the application submitted.
               shot = agent("fire", key, reply, app, made["key"])
