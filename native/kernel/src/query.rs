@@ -515,6 +515,11 @@ fn filter(c: &Column, test: &Json) -> Result<Test, Refusal> {
         ("like" | "prefix", Json::String(s)) if s.len() > 1000 => {
             return Err(no(refusal::TOO_LARGE, json!({"column": c.name, "filter": op, "max": 1000})));
         }
+        // `like` is a case-insensitive substring, not SQL's pattern: a caller who writes
+        // "%acme%" means to find acme and would silently match nothing, so the refusal says so.
+        ("like", Json::String(s)) if s.contains('%') => {
+            return Err(no(refusal::TYPE, json!({"column": c.name, "filter": op, "reason": "like is a case-insensitive substring and takes no % wildcards: drop the % signs (\"acme\" finds \"Acme Corp\"), or use prefix for a leading match", "got": s})));
+        }
         ("like", Json::String(s)) if text => Test::Like(s.to_ascii_lowercase()),
         ("prefix", Json::String(s)) if text => Test::Prefix(s.to_ascii_lowercase()),
         _ => return Err(no(refusal::TYPE, json!({"column": c.name, "filter": brief(test)}))),

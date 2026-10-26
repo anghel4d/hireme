@@ -157,10 +157,10 @@ fn start(w: World) -> Sim {
         People::HiringManager => vec![person(8, Relation::HiringManager, true)],
     };
     let cv = match w.cv {
-        Cvs::File => Cv { pinned: false, root: Some(1), file: true, file_root: Some(1), newest: Some(1) },
-        Cvs::Text => Cv { pinned: false, root: Some(1), file: false, file_root: Some(2), newest: Some(2) },
+        Cvs::File => Cv { pinned: false, chosen: true, root: Some(1), file: true, file_root: Some(1), newest: Some(1) },
+        Cvs::Text => Cv { pinned: false, chosen: true, root: Some(1), file: false, file_root: Some(2), newest: Some(2) },
         Cvs::Missing => Cv::default(),
-        Cvs::Unpicked => Cv { pinned: false, root: None, file: false, file_root: Some(2), newest: Some(2) },
+        Cvs::Unpicked => Cv { pinned: false, chosen: false, root: None, file: false, file_root: Some(2), newest: Some(2) },
     };
     let mut f = Facts {
         app: 1,
@@ -378,7 +378,7 @@ impl Sim {
                 self.f.batch = true;
             }
             Act::Pin(root) => {
-                self.f.cv = Cv { pinned: true, root: Some(*root), file: self.is_file(*root), ..self.f.cv };
+                self.f.cv = Cv { pinned: true, chosen: true, root: Some(*root), file: self.is_file(*root), ..self.f.cv };
                 let file = self.f.cv.file;
                 for m in self.f.missions.iter_mut().filter(|m| m.state == MState::FireReady) {
                     m.hold = (m.kind == Kind::Email && !m.threaded && !file).then_some("cv_file");
@@ -484,7 +484,7 @@ impl Sim {
                     return Err("asked for a CV while a PDF root is there to pin".into());
                 }
                 self.uploaded = true;
-                self.f.cv = Cv { pinned: false, root: Some(3), file: true, file_root: Some(3), newest: Some(3) };
+                self.f.cv = Cv { pinned: false, chosen: true, root: Some(3), file: true, file_root: Some(3), newest: Some(3) };
             }
             Ask::Key(r) => {
                 let decline = self.w.decline && !self.declined;
@@ -1037,7 +1037,14 @@ fn a_cv_no_rule_picks_is_pinned_and_a_missing_file_asked_for_by_its_route() {
     let mut k = desk_cv(serde_json::json!([]), true, false);
     let answers = follow(&mut k, (7, 412), TODAY, "applied");
     let pin = answers.iter().find(|a| a["next"]["tool"] == "pick_cv").expect("a pin");
-    assert_eq!((pin["next"]["args"]["cv_root_id"].as_u64(), pin["next"]["why"].as_str()), (Some(1), Some("the form takes the CV as a file: pin a PDF or DOCX")), "{pin}");
+    // The pin names the file the route needs AND that nothing chose that root: a
+    // default that reads like a match is how a house-sitting job ended up wearing
+    // the Software Engineer CV.
+    assert_eq!(
+        (pin["next"]["args"]["cv_root_id"].as_u64(), pin["next"]["why"].as_str()),
+        (Some(1), Some("the form takes the CV as a file: pin a PDF or DOCX; no rule picks a CV for app:412: this is me.cv_default_root_id, not a match — pin the right root, or fix cv_rules")),
+        "{pin}"
+    );
     assert!(!answers.iter().any(|a| a["next"]["kind"] == "ask" && a["next"]["ask"].as_str().is_some_and(|t| t.contains("CV"))));
     // Only a text CV: the operator is asked for a file, in the route's words.
     let mut k = desk_cv(serde_json::json!([]), false, true);

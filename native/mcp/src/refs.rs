@@ -145,7 +145,14 @@ fn not_a_ref(field: &str, why: String) -> Refused {
 
 /// A row no ref names: `app:412` with no application 412.
 fn missing(field: &str, r: &Ref, text: &str) -> Refused {
-    refuse("not_found", json!({"field": field, "table": table_name(r.kind()), "ref": text, "reason": format!("no row {text}")}))
+    // A row written a moment ago can be missing from this session's replica while it
+    // catches up, and the caller cannot tell that from a typo; so say both.
+    let try_this = match r.kind() {
+        Kind::App => "check the number, or name the row by its id ({\"table\":\"applications\",\"id\":N}): a row written seconds ago may not be in this session's replica yet — retry",
+        Kind::Corp => "check the domain, or name the corporation by its id: a row written seconds ago may not be in this session's replica yet — retry",
+        _ => "check the id: a row written seconds ago may not be in this session's replica yet — retry",
+    };
+    refuse("not_found", json!({"field": field, "table": table_name(r.kind()), "ref": text, "reason": format!("no row {text}"), "try": try_this}))
 }
 
 /// The nearest known key, by exact match, prefix or a small edit distance.

@@ -269,7 +269,14 @@ pub async fn stdio(up: Arc<Upstream>) {
                 continue;
             }
             Ok(_) | Err(_) => {
-                let _ = out.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"not a JSON-RPC message"}}));
+                // A blob that spans lines is the mistake callers actually make: the door reads one
+                // message per line, so name that rather than only saying "not JSON".
+                let message = if line.trim_start().starts_with('{') && !line.trim_end().ends_with('}') {
+                    "this line is not a whole JSON-RPC message: the stdio door reads one message per line, so arguments must stay on one line (a multi-line blob arrives as fragments)"
+                } else {
+                    "not a JSON-RPC message"
+                };
+                let _ = out.send(json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":message}}));
                 continue;
             }
         };

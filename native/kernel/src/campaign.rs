@@ -247,6 +247,10 @@ pub enum DayPack {
 pub struct Cv {
     /// Pinned on the application (pick_cv), not only the rules' pick.
     pub pinned: bool,
+    /// A rule matched, or the operator or an agent pinned one: the root the pick
+    /// names is a decision about this application, not the account's default.
+    /// The documents step says which it is, so a default never passes for a match.
+    pub chosen: bool,
     /// The root the pick names.
     pub root: Option<u32>,
     /// Whether that version is a file (a PDF or DOCX upload).
@@ -930,8 +934,16 @@ fn call(f: &Facts, act: &Act) -> (&'static str, Json, String) {
             ("put", json!({"table": "batches", "set": {"code": code, "ordinal": ordinal, "kind": "day_pack", "queued_on": iso(f.today)}}), "today's day pack does not exist yet: make it, then join it".into())
         }
         Act::Pin(root) => {
-            let why = match f.file_need() {
-                Some(need) if !f.cv.file => alloc::format!("{need}: pin a PDF or DOCX"),
+            // A pick nothing chose is the account's default, and saying so is the
+            // whole warning: a house-sitting job wearing the Software Engineer CV
+            // looks exactly like a match unless this line names it.
+            let fallback = (!f.cv.chosen).then(|| alloc::format!("no rule picks a CV for {app}: this is me.cv_default_root_id, not a match — pin the right root, or fix cv_rules"));
+            let why = match (f.file_need(), fallback.as_deref()) {
+                (Some(need), fb) if !f.cv.file => match fb {
+                    Some(fb) => alloc::format!("{need}: pin a PDF or DOCX; {fb}"),
+                    None => alloc::format!("{need}: pin a PDF or DOCX"),
+                },
+                (_, Some(fb)) => fb.into(),
                 _ if Some(*root) == f.cv.root => "confirm the CV the rules picked".into(),
                 _ => alloc::format!("no rule picks a CV for {app}: pin the newest"),
             };
@@ -1247,7 +1259,14 @@ impl<'r> Index<'r> {
         };
         let pick = self.cvs.pick(rows, app);
         let file_version = |v: Option<u32>| v.and_then(|v| rows.table(table::CV_VERSIONS).and_then(|vt| vt.str(v, cv_versions::BLOB_SHA))).is_some_and(|s| !s.is_empty());
-        let cv = Cv { pinned: pick.state == crate::pick::State::Pinned, root: pick.root, file: file_version(pick.version), file_root: self.file_root, newest: self.newest };
+        let cv = Cv {
+            pinned: pick.state == crate::pick::State::Pinned,
+            chosen: matches!(pick.state, crate::pick::State::Pinned | crate::pick::State::Matched),
+            root: pick.root,
+            file: file_version(pick.version),
+            file_root: self.file_root,
+            newest: self.newest,
+        };
         let listed = crate::filer::lex(&listing_raw).into_iter().find(|tk| tk.class == crate::filer::Class::Address).map(|tk| tk.text);
         let words = crate::filer::words(&listing_raw);
         let letter_asked = ["cover letter", "motivation letter", "anschreiben", "lettre de motivation"].iter().any(|p| alloc::format!(" {words} ").contains(&alloc::format!(" {p} ")));
