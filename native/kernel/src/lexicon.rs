@@ -114,7 +114,9 @@ const NEEDLES: &[(&[&str], Mode, Group)] = &[
     (&["security", "privacy"], Start, DEPT_SECURITY),
     (&["data engineer", "analytics", "data platform"], Start, DEPT_DATA),
     (&["frontend", "front end", "ios", "android", "mobile", "product engineer"], Start, DEPT_PRODUCT),
-    (&["engineer", "developer"], Start, DEPT_ENG),
+    // A title is engineering by any of its makers' words: "Engine Programmer" and
+    // "Data Solution Architect" read as other before these, so CV rules wrote them by hand.
+    (&["engineer", "developer", "software", "programmer", "architect"], Start, DEPT_ENG),
     (&["swe"], Whole, DEPT_ENG),
     (&["research scientist", "applied scientist"], Start, FAM_RESEARCH_SCIENTIST),
     (&["research engineer"], Start, FAM_RESEARCH_ENGINEER),
@@ -122,7 +124,7 @@ const NEEDLES: &[(&[&str], Mode, Group)] = &[
     (&["sre"], Whole, FAM_SRE),
     (&["data engineer"], Start, FAM_DATA_ENGINEER),
     (&["security engineer"], Start, FAM_SECURITY_ENGINEER),
-    (&["software engineer", "engineer", "developer"], Start, FAM_SOFTWARE_ENGINEER),
+    (&["software engineer", "engineer", "developer", "software", "programmer", "architect"], Start, FAM_SOFTWARE_ENGINEER),
     (&["swe"], Whole, FAM_SOFTWARE_ENGINEER),
 ];
 

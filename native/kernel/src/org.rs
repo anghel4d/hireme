@@ -178,6 +178,9 @@ mod tests {
             ("Infrastructure Engineer", Department::Infra),
             ("iOS Engineer", Department::Product),
             ("Software Engineer", Department::Eng),
+            ("Engine Programmer", Department::Eng),
+            ("Data Solution Architect", Department::Eng),
+            ("Lead Software Developer", Department::Eng),
             ("Recruiter", Department::Other),
             ("Swedish Teacher", Department::Other),
         ] {
@@ -189,6 +192,8 @@ mod tests {
             ("Account Executive", Family::Other),
             ("Engineering Manager", Family::SoftwareEngineer),
             ("Senior Engineers", Family::SoftwareEngineer),
+            ("Senior Gameplay Programmer", Family::SoftwareEngineer),
+            ("Solutions Architect", Family::SoftwareEngineer),
         ] {
             assert_eq!(family(&n(title)), want, "{title}");
         }
