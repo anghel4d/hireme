@@ -153,9 +153,11 @@ let
     mixFodDeps = beamPackages.fetchMixDeps {
       pname = "hireme-mix-deps";
       version = builtins.substring 0 12 (builtins.hashFile "sha256" (source + "/mix.lock"));
+      # mix.exs loads the schema compiler before it reads the deps.
       src = only "hireme-mix-lock" [
         "mix.exs"
         "mix.lock"
+        "schema/build.exs"
       ];
       mixEnv = "prod";
       hash = mixDepsHash;
