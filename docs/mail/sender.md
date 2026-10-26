@@ -16,6 +16,10 @@ On the 25-a-day cap the mail plan had set (docs/mail/passthrough.md):
 
 So hireme has no send cap of its own. Gmail (about 500 a day for a personal account) and Cloudflare Email Sending enforce their own limits. A send they refuse for quota (Gmail's `550 5.4.5`, Cloudflare's rate or quota error) returns the mission to fire_ready with that reason, and the campaign says it is the provider's limit.
 
+> Correct. Surface the providers limits and make it their problem. On our end, just have a heartbeat or have the MCP hint that you may want to sleep a bit between sends to not barrage and hit rate limits (HINT)
+
+So pacing is a hint, never a block: after an email goes out, the MCP's answer suggests a pause before the next send.
+
 ## The design
 
 - **Two sending identities per account.**
@@ -47,6 +51,6 @@ So hireme has no send cap of its own. Gmail (about 500 a day for a personal acco
   - the compose's From select, shown locked once sent;
   - the mission brief's sender line;
   - enabling sending for anghel4d.com;
-  - the cap's surfaces go: the MCP's quota lines (mission brief, fire_keys), the page's quota; a provider's quota refusal is named as such.
+  - the cap's surfaces go: the MCP's quota lines (mission brief, fire_keys), the page's quota; a provider's quota refusal is named as such; after an email shot the MCP hints at a pause before the next send.
 
 The line budget follows the campaigns feature (suspended; each commit states its net). Gates are those of docs/mcp/campaigns.md.
