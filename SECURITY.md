@@ -438,7 +438,7 @@ writer for long.
 | Policy | Value |
 | --- | --- |
 | Session lifetime / idle | 24 hours / 1 hour |
-| Step-up window | 5 minutes |
+| Step-up window | the session's life: the sign-in (or a factor in the session) is the proof, the operator's call on 2026-10-26 |
 | Ceremony challenge / magic link / wire ticket | 5 minutes / 10 minutes / 60 seconds |
 | OAuth round trip, and an address waiting to be added | 10 minutes |
 | Carrier PING / timeout | 15 seconds / 45 seconds |

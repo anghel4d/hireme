@@ -36,10 +36,13 @@ defmodule Hireme.Security do
   @spec session_idle(boolean()) :: pos_integer()
   def session_idle(remember \\ false), do: if(remember, do: 30 * 24 * 60 * 60, else: 60 * 60)
 
-  # ASVS 7.5.1, 7.5.3: re-authenticate before a sensitive change; a second
-  # factor presented within this window counts.
+  # A sensitive change needs a proof of the person: the sign-in itself, or a
+  # factor presented in the session. The operator (2026-10-26): "'Email me a
+  # code' on practically everything is getting fucking tedious. My session is
+  # authenticated already." So a proof lasts as long as a session can (a
+  # remembered one's 90 days): one per sign-in, never a code per change.
   @spec step_up_window() :: pos_integer()
-  def step_up_window, do: 5 * 60
+  def step_up_window, do: 90 * 24 * 60 * 60
 
   # A ceremony in flight (WebAuthn challenge, pending TOTP seed).
   @spec challenge_ttl() :: pos_integer()
