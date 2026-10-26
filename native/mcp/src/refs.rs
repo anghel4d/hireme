@@ -512,7 +512,7 @@ fn ranges(v: &Json) -> Result<String, Refused> {
 const COMMON: [&str; 7] = ["app", "application", "application_id", "draft", "note", "state", "contact"];
 /// Each kind's own keys.
 const OWN: [(&str, &[&str]); 7] = [
-    ("email", &["to", "cc", "subject", "in_reply_to", "refs"]),
+    ("email", &["to", "cc", "subject", "in_reply_to", "refs", "from"]),
     ("careers_page", &["form"]),
     ("linkedin", &["profile"]),
     ("x_dm", &["handle"]),
@@ -521,7 +521,7 @@ const OWN: [(&str, &[&str]); 7] = [
     ("note", &[]),
 ];
 /// Every union key, for telling a mission's keys on another table's put.
-const UNION_KEYS: [&str; 17] = ["app", "application", "application_id", "draft", "note", "state", "contact", "contact_id", "to", "cc", "subject", "in_reply_to", "refs", "form", "profile", "handle", "target"];
+const UNION_KEYS: [&str; 18] = ["app", "application", "application_id", "draft", "note", "state", "contact", "contact_id", "to", "cc", "subject", "in_reply_to", "refs", "from", "form", "profile", "handle", "target"];
 /// The put's own keys beside the union's.
 const ENVELOPE: [&str; 9] = ["ref", "table", "id", "key", "set", "expect_rev", "create_only", "as_of", "source"];
 
@@ -623,6 +623,10 @@ fn mission_union(a: &mut Map<String, Json>, inserting: bool, look: &mut dyn Look
             "refs" => {
                 lowered.insert("refs".into(), joined(&v, " ").map_or(Json::Null, Json::String));
             }
+            // Who the email goes out as (docs/mail/sender.md): the column's own values.
+            "from" => {
+                lowered.insert("sender".into(), v);
+            }
             "in_reply_to" => {
                 let id = match v.as_str() {
                     Some(s) if ref_like(s) => match parse(s).map_err(|w| not_a_ref("in_reply_to", w))? {
@@ -679,6 +683,7 @@ pub fn mission_schema() -> Json {
             "to": {"description": "1 to 10 addresses", "oneOf": [addr, {"type": "array", "minItems": 1, "maxItems": 10, "items": addr}]},
             "cc": {"oneOf": [addr, {"type": "array", "maxItems": 10, "items": addr}]},
             "subject": {"type": "string"},
+            "from": {"type": "string", "enum": schema::enum_names("sender").unwrap_or(&[]), "description": "who it goes out as: gmail (the linked Gmail, the default) or domain (the account's domain address); changeable until it is sent"},
             "in_reply_to": {"type": "string", "description": "a Message-ID, or outreach:<id> of the mail it answers"},
             "refs": {"type": "array", "items": {"type": "string"}, "description": "the References header's ids"}
         }), &["to"]),
@@ -788,8 +793,8 @@ mod tests {
 
     #[test]
     fn a_mission_is_put_by_its_kind_and_lowered_to_its_row() {
-        let m = ok("put", json!({"ref": "mission:new", "kind": "email", "app": "app:412", "to": ["Dana <dana@acme.com>", "jobs@acme.com"], "cc": "cto@acme.com", "subject": "Hi", "draft": "Hello", "in_reply_to": "outreach:1291", "refs": ["<a@x>", "<b@x>"]}));
-        assert_eq!(m, json!({"table": "missions", "set": {"kind": "email", "application_id": 120, "target": "dana@acme.com, jobs@acme.com", "cc": "cto@acme.com", "subject": "Hi", "draft": "Hello", "in_reply_to": "<r1@acme.example>", "refs": "<a@x> <b@x>"}}));
+        let m = ok("put", json!({"ref": "mission:new", "kind": "email", "app": "app:412", "to": ["Dana <dana@acme.com>", "jobs@acme.com"], "cc": "cto@acme.com", "subject": "Hi", "draft": "Hello", "in_reply_to": "outreach:1291", "refs": ["<a@x>", "<b@x>"], "from": "domain"}));
+        assert_eq!(m, json!({"table": "missions", "set": {"kind": "email", "application_id": 120, "target": "dana@acme.com, jobs@acme.com", "cc": "cto@acme.com", "subject": "Hi", "draft": "Hello", "in_reply_to": "<r1@acme.example>", "refs": "<a@x> <b@x>", "sender": "domain"}}));
         let c = ok("put", json!({"ref": "mission:new", "kind": "careers_page", "application": "app:7", "form": "https://boards.greenhouse.io/acme/jobs/1", "draft": "- name: Ana"}));
         assert_eq!(c["set"]["target"], "https://boards.greenhouse.io/acme/jobs/1");
         let x = ok("put", json!({"ref": "mission:new", "kind": "x_dm", "app": "app:7", "handle": "@dana", "draft": "hi"}));

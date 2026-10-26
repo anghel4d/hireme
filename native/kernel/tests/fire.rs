@@ -18,7 +18,7 @@ use serde_json::{Value as Json, json};
 /// app 2), 13 (careers page, app 1, still a draft); a live mailbox with a
 /// daily cap of `cap`; every pick sending CV version 5, a file when
 /// `cv_blob` is not empty.
-fn kernel_with(cap: u32, cv_blob: &str) -> Kernel {
+fn kernel_with(cv_blob: &str) -> Kernel {
     let app = |id: u32, role: &str, notes: &str| {
         json!({"id": id, "no": id, "stage": "fire_ready", "pips": "DDDDDAPPPP", "company": "Acme", "role": role, "corporation_id": 1, "place_id": 1, "stage_notes": notes, "stage_on": TODAY, "heat_override": false})
     };
@@ -37,12 +37,12 @@ fn kernel_with(cap: u32, cv_blob: &str) -> Kernel {
         "cv_roots": [{"id": 1, "slug": "main", "name": "Main", "format": "pdf", "version_id": 5}],
         "cv_versions": [{"id": 5, "root_id": 1, "n": 1, "blob_sha": cv_blob, "actor": "operator"}],
         "me": [{"id": 1, "cv_default_root_id": 1}],
-        "mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "live", "daily_cap": cap}],
+        "mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "live"}],
     }))
 }
 
-fn kernel(cap: u32) -> Kernel {
-    kernel_with(cap, "5f1e9b")
+fn kernel() -> Kernel {
+    kernel_with("5f1e9b")
 }
 
 fn fire(mission: u32, key: Option<u32>) -> Vec<u8> {
@@ -80,7 +80,7 @@ fn row(k: &mut Kernel, table: &str, id: u32) -> Json {
 
 #[test]
 fn a_shot_needs_a_key_goes_once_and_the_commander_answers_the_rest() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     // Without a key no one fires, the operator included: the answer says
     // what a request for it would carry.
     for ctx in [agent(3, NOON), operator(NOON)] {
@@ -137,7 +137,7 @@ fn a_ledger_send_settled_as_applied_is_recorded_on_its_day() {
     // The operator's word that it went out is the send's record: submitted
     // on the ledger's day, the ledger's notes kept, and it closes as a sent
     // application does.
-    let mut k = kernel(20);
+    let mut k = kernel();
     k.predict(&put("applications", 2, json!({"prior_send": "applied"})), &operator(NOON)).unwrap();
     let app = row(&mut k, "applications", 2);
     assert_eq!((app["stage"].as_str(), app["applied_on"].as_str(), app["stage_on"].as_str()), (Some("submitted"), Some("2026-10-12"), Some("2026-10-12")), "{app}");
@@ -147,21 +147,21 @@ fn a_ledger_send_settled_as_applied_is_recorded_on_its_day() {
     assert_eq!(close(&mut k, "expired").expect_err("it went out").code, refusal::TYPE);
     close(&mut k, "ghosted").unwrap();
     // Its word that nothing went out moves nothing: it closes unsent.
-    let mut k = kernel(20);
+    let mut k = kernel();
     k.predict(&put("applications", 2, json!({"prior_send": "not_applied"})), &operator(NOON)).unwrap();
     assert_eq!(row(&mut k, "applications", 2)["stage"], "fire_ready");
     assert_eq!(close(&mut k, "ghosted").expect_err("nothing went out").code, refusal::TYPE);
     // The word and an outcome in one put are judged on the send it records.
-    let mut k = kernel(20);
+    let mut k = kernel();
     k.predict(&put("applications", 2, json!({"prior_send": "applied", "outcome": "ghosted"})), &operator(NOON)).unwrap();
-    let mut k = kernel(20);
+    let mut k = kernel();
     let r = k.predict(&put("applications", 2, json!({"prior_send": "not_applied", "outcome": "ghosted"})), &operator(NOON));
     assert_eq!(r.expect_err("nothing went out").code, refusal::TYPE);
 }
 
 #[test]
 fn a_key_fires_exactly_what_was_reviewed() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     let key = create(&mut k, "10", None, NOON);
     let edit = |cells: Json| put("missions", 10, cells);
     // An agent rewrites the draft after the key was made: the key no
@@ -190,7 +190,7 @@ fn a_key_fires_exactly_what_was_reviewed() {
 
 #[test]
 fn a_failed_shot_stays_covered_and_a_bound_key_serves_its_own() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     let key = create(&mut k, "10", Some(4), NOON);
     // Bound to API key 4: another agent's shot is not its own; the
     // operator's session may use any live key.
@@ -214,7 +214,7 @@ fn a_failed_shot_stays_covered_and_a_bound_key_serves_its_own() {
 
 #[test]
 fn an_unused_key_lives_a_week() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     create(&mut k, "10", None, NOON);
     assert_eq!(q(&mut k, json!({"op": "live_keys", "now": NOON}))["keys"][0]["expires_in"], "168:00:00");
     assert_eq!(answer(k.predict(&fire(10, None), &agent(3, NOON + 7 * 24 * HOUR)))["why"], "expired");
@@ -223,8 +223,8 @@ fn an_unused_key_lives_a_week() {
 }
 
 #[test]
-fn an_email_shot_is_the_mail_actors_to_report_under_the_daily_cap() {
-    let mut k = kernel(1);
+fn an_email_shot_is_the_mail_actors_to_report_and_goes_out_as_its_locked_sender() {
+    let mut k = kernel();
     create(&mut k, "11", None, NOON);
     k.predict(&fire(11, None), &agent(3, NOON)).unwrap();
     // The node stamps its Message-ID once, before it sends; an agent never
@@ -246,24 +246,32 @@ fn an_email_shot_is_the_mail_actors_to_report_under_the_daily_cap() {
     assert_eq!((m["state"].as_str(), m["message_id"].as_str(), m["confirmation"].clone()), (Some("fired"), Some("hm.x1@example.com"), Json::Null));
     assert_eq!(m["gmail_thrid"], 1_800_000_000_000_000_000_i64);
     assert_eq!(row(&mut k, "applications", 1)["stage"], "submitted");
-    // The cap counts the day's email shots: a second email waits for the
-    // reset, which the answer names.
-    let draft = json!({"application_id": 1, "kind": "email", "target": "cto@acme.example", "subject": "Following up", "draft": "Hello again", "state": "fire_ready"});
+    // hireme keeps no send cap (docs/mail/sender.md): a second email goes the same day. Its
+    // sender is part of its draft: the domain address needs one on file, which only the
+    // operator sets, and a key approves the sender with the draft.
+    let draft = json!({"application_id": 1, "kind": "email", "target": "cto@acme.example", "subject": "Following up", "draft": "Hello again", "state": "fire_ready", "sender": "domain"});
     k.predict(&put("missions", 0, draft), &agent(3, NOON)).unwrap();
     let id = q(&mut k, json!({"op": "missions", "kind": "email", "state": "fire_ready"}))["missions"][0]["id"].as_u64().unwrap() as u32;
     create(&mut k, &id.to_string(), None, NOON);
-    let a = answer(k.predict(&fire(id, None), &agent(3, NOON)));
-    assert_eq!((a["why"].as_str(), a["used"].as_u64(), a["resets_at"].as_str()), (Some("cap"), Some(1), Some(kernel::time_iso(NOON - 43_200 + 86_400).as_str())));
-    assert_eq!(q(&mut k, json!({"op": "mail_quota", "now": NOON})), json!({"cap": 1, "used": 1, "left": 0, "resets_at": kernel::time_iso(NOON + 43_200)}));
-    k.predict(&fire(id, None), &agent(3, NOON + 43_200)).unwrap();
+    assert_eq!(answer(k.predict(&fire(id, None), &agent(3, NOON)))["why"], "domain_sender");
+    assert_eq!(k.predict(&put("mailboxes", 1, json!({"domain_from": "ana@anghel4d.example"})), &agent(3, NOON)).expect_err("operator only").code, refusal::SCOPE);
+    assert_eq!(k.predict(&put("mailboxes", 1, json!({"domain_from": "not an address"})), &operator(NOON)).expect_err("one address").code, refusal::TYPE);
+    k.predict(&put("mailboxes", 1, json!({"domain_from": "ana@anghel4d.example"})), &operator(NOON)).unwrap();
+    // Changing the sender after approval leaves the key's scope; changing it back restores it.
+    k.predict(&put("missions", id, json!({"sender": "gmail"})), &agent(3, NOON)).unwrap();
+    assert_eq!(answer(k.predict(&fire(id, None), &agent(3, NOON)))["why"], "changed");
+    k.predict(&put("missions", id, json!({"sender": "domain"})), &agent(3, NOON)).unwrap();
+    k.predict(&fire(id, None), &agent(3, NOON)).unwrap();
+    // Once it is going out, the sender is locked with the rest of the draft.
+    assert_eq!(k.predict(&put("missions", id, json!({"sender": "gmail"})), &agent(3, NOON)).expect_err("locked once sent").data["rule"], "record");
     // The node lands a mail only once it has stamped its Message-ID.
-    let r = k.predict(&landed(id), &mail(NOON + 43_200)).expect_err("unstamped");
+    let r = k.predict(&landed(id), &mail(NOON)).expect_err("unstamped");
     assert_eq!((r.code, r.data["rule"].as_str()), (refusal::STAGE, Some("unstamped")));
 }
 
 #[test]
 fn requests_are_stamped_and_only_the_operator_answers_them() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     k.predict(&put("fire_requests", 0, json!({"missions": " 11, 10 ", "reason": "Acme: both routes drafted"})), &agent(7, NOON)).unwrap();
     let req = &q(&mut k, json!({"op": "find", "table": "fire_requests"}))["rows"][0];
     assert_eq!((req["missions"].as_str(), req["requested_by"].as_u64(), req["status"].as_str()), (Some("10-11"), Some(7), Some("open")));
@@ -286,7 +294,7 @@ fn requests_are_stamped_and_only_the_operator_answers_them() {
 
 #[test]
 fn the_record_stays() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     let key = create(&mut k, "10", None, NOON);
     // No one drops a key or its shots: a key is revoked.
     for ctx in [agent(3, NOON), operator(NOON)] {
@@ -304,15 +312,15 @@ fn the_record_stays() {
     assert_eq!(k.predict(&put("missions", 11, json!({"target": "the hiring team"})), &agent(3, NOON)).expect_err("not an address list").code, refusal::TYPE);
     // A mission is any outreach kind but a note.
     assert_eq!(k.predict(&put("missions", 13, json!({"kind": "note"})), &agent(3, NOON)).expect_err("never a note").code, refusal::TYPE);
-    // The mailbox is the mail actor's (its address) and the operator's (its cap).
+    // The mailbox is the mail actor's (its address) and the operator's (its domain address).
     assert_eq!(k.predict(&put("mailboxes", 1, json!({"address": "other@example.com"})), &operator(NOON)).expect_err("mail only").code, refusal::SCOPE);
-    assert_eq!(k.predict(&put("mailboxes", 1, json!({"daily_cap": 500})), &agent(3, NOON)).expect_err("operator only").code, refusal::SCOPE);
+    assert_eq!(k.predict(&put("mailboxes", 1, json!({"domain_from": "ana@example.com"})), &agent(3, NOON)).expect_err("operator only").code, refusal::SCOPE);
 }
 
 #[test]
 fn a_first_email_goes_with_the_cv_as_a_file() {
     // The pick's version is markdown (no file): a first-contact email is held.
-    let mut k = kernel_with(25, "");
+    let mut k = kernel_with("");
     let review = q(&mut k, json!({"op": "fire_review", "missions": "11"}));
     assert_eq!((review["missions"][0]["why"].as_str(), review["scope"].as_str()), (Some("cv_file"), Some("")));
     assert_eq!(answer(k.predict(&fire(11, None), &operator(NOON)))["why"], "cv_file");
@@ -344,7 +352,7 @@ fn a_first_email_goes_with_the_cv_as_a_file() {
 
 #[test]
 fn an_email_goes_to_ten_recipients_at_most() {
-    let mut k = kernel(25);
+    let mut k = kernel();
     let list = |n: usize, at: &str| (0..n).map(|i| format!("p{i}@{at}")).collect::<Vec<_>>().join(", ");
     k.predict(&put("missions", 11, json!({"target": list(6, "acme.example")})), &agent(3, NOON)).unwrap();
     assert_eq!(k.predict(&put("missions", 11, json!({"cc": list(5, "initech.example")})), &agent(3, NOON)).expect_err("eleven recipients").code, refusal::TYPE);
@@ -356,7 +364,7 @@ fn an_email_goes_to_ten_recipients_at_most() {
 /// unlink: it must not revive the mailbox, whose erase waits on the unlinked status. Only a new link moves it.
 #[test]
 fn an_unlinked_mailbox_takes_no_state_but_linking() {
-    let mut k = fixture::kernel(json!({"mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "unlinked", "daily_cap": 20}]}));
+    let mut k = fixture::kernel(json!({"mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "unlinked"}]}));
     for status in ["live", "error", "auth_failed"] {
         assert_eq!(k.predict(&cmd("mailbox_state", 1, json!({"status": status})), &mail(NOON)).expect_err(status).code, refusal::UNLINKED);
     }
@@ -387,7 +395,7 @@ fn a_route_is_what_its_kind_reads() {
         assert_eq!(target(kind, given).ok().as_deref(), want, "{kind:?} {given:?}");
     }
     // Through the put: a given target is stored as read, a bad one refused.
-    let mut k = kernel(25);
+    let mut k = kernel();
     k.predict(&put("missions", 10, json!({"target": "https://job-boards.greenhouse.io/acme/jobs/9 "})), &agent(3, NOON)).unwrap();
     assert_eq!(row(&mut k, "missions", 10)["target"], "https://job-boards.greenhouse.io/acme/jobs/9");
     assert_eq!(k.predict(&put("missions", 10, json!({"target": "acme.example/apply"})), &agent(3, NOON)).expect_err("not an https form").code, refusal::TYPE);

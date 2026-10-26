@@ -29,7 +29,8 @@ So pacing is a hint, never a block: after an email goes out, the MCP's answer su
   - set, saved, shown and changed while the mission is staged (draft, draft_ready, fire_ready);
   - refused once it is in flight or fired, so the sender is locked once sent;
   - covered by the fire key's hash, so an approved shot cannot change its sender.
-- **Holds:** a domain mission cannot fire while the account has no `domain_from`. That is a hold (`domain_sender`) the review shows, and the campaign asks the user to set it.
+- **The domain address at fire time:** a domain mission cannot fire while the account has no `domain_from`; the fire is refused `domain_sender` (the commander says so), and the campaign asks the user to set it or switch the email to gmail. It is not a pre-key hold: nothing in the draft fixes it. The address lives on the mailboxes row, so it is set once Gmail has been linked once.
+- **Sending:** a domain email goes through Cloudflare Email Sending, Gmail linked or not. Cloudflare mints the Message-ID, so the node sends, stamps the id it answered, then lands. A domain email found in flight and unstamped five minutes on (a restart) is failed with "outcome unknown", never sent again on its own.
 - **Campaign defaults:** an application's primary email, its nudges and its replies default to `gmail`, because the applications went out as Gmail and ATSs key candidates by address. A cold email (`channel cold`) defaults to `domain`. The default is only the draft's starting value; it stays changeable.
 
 ## Lanes

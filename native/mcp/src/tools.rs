@@ -313,7 +313,7 @@ pub fn list(m: Masks) -> Vec<Json> {
         out.push(tool(
             "fire_keys",
             "Live fire keys",
-            "The account's live fire keys: each key's missions (scope), what remains, what is burned, in flight or changed since approval, who may use it and when it expires; and today's mail quota. Every shot needs one; only the operator creates them.".into(),
+            "The account's live fire keys: each key's missions (scope), what remains, what is burned, in flight or changed since approval, who may use it and when it expires. Every shot needs one; only the operator creates them.".into(),
             json!({"type":"object","properties":{},"additionalProperties":false}),
             true,
             false,

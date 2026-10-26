@@ -379,7 +379,7 @@ pub fn hash(rows: &Rows, cvs: &Cvs, id: u32) -> Option<String> {
     let t = missions(rows).filter(|t| t.has(id))?;
     let app = t.u32(id, M::APPLICATION_ID).unwrap_or(0);
     let mut h = Sha256::new();
-    h.update(b"hireme mission v1");
+    h.update(b"hireme mission v2");
     let mut field = |tag: u8, bytes: &[u8]| {
         h.update([tag]);
         h.update((bytes.len() as u64).to_le_bytes());
@@ -394,6 +394,8 @@ pub fn hash(rows: &Rows, cvs: &Cvs, id: u32) -> Option<String> {
     field(7, text(t, id, M::REFS).as_bytes());
     field(8, &app.to_le_bytes());
     field(9, &cvs.version(rows, app).unwrap_or(0).to_le_bytes());
+    // Who it goes out as: a key approves the sender with the draft.
+    field(10, &t.u32(id, M::SENDER).unwrap_or(0).to_le_bytes());
     Some(hex(&h.finalize()))
 }
 
@@ -676,11 +678,6 @@ pub fn authority(rows: &Rows, ctx: &Ctx, mission: u32, named: Option<u32>) -> Re
 
 // ------------------------------------------------------------------ the mailbox and the cap
 
-/// The UTC day of unix seconds.
-fn day_of(secs: i64) -> i64 {
-    secs.div_euclid(86_400)
-}
-
 /// Whether the linked mailbox is live: an email shot can go.
 pub fn mailbox_live(rows: &Rows) -> bool {
     rows.first(table::MAILBOXES).is_some_and(|(t, id)| t.u32(id, MB::STATUS) == Some(u32::from(enums::mailbox_status::LIVE)))
@@ -700,37 +697,27 @@ pub fn revoked_cover(rows: &Rows, mission: u32) -> bool {
     shots(rows).any(|s| s.mission == mission && key(rows, s.key).is_some_and(|k| k.revoked.is_some()))
 }
 
-/// The day's send cap, how many email shots went or are going today (UTC),
-/// and when the count resets.
-pub fn quota(rows: &Rows, now: i64) -> (u32, u32, i64) {
-    let cap = rows.first(table::MAILBOXES).and_then(|(t, id)| t.u32(id, MB::DAILY_CAP)).unwrap_or(25);
-    let today = day_of(now);
-    let used = missions(rows).map_or(0, |t| {
-        t.ids()
-            .iter()
-            .filter(|&&id| is_email(t, id))
-            .filter(|&&id| match state(t, id) {
-                enums::mission_state::IN_FLIGHT => t.u32(id, M::IN_FLIGHT_AT).is_some_and(|s| day_of(i64::from(s)) == today),
-                enums::mission_state::FIRED => t.u32(id, M::FIRED_AT).is_some_and(|s| day_of(i64::from(s)) == today),
-                _ => false,
-            })
-            .count() as u32
-    });
-    (cap, used, (today + 1) * 86_400)
+/// The account's domain address, the From of a domain-sender email (docs/mail/sender.md).
+pub fn domain_from(rows: &Rows) -> Option<&str> {
+    rows.first(table::MAILBOXES).and_then(|(t, id)| t.str(id, MB::DOMAIN_FROM)).filter(|a| !a.trim().is_empty())
 }
 
-/// An email shot's own gates: a live mailbox and room under the cap.
+/// Whether email mission `id` goes out as the domain address.
+pub fn domain_sender(t: &Table, id: u32) -> bool {
+    t.u32(id, M::SENDER) == Some(u32::from(enums::sender::DOMAIN))
+}
+
+/// An email shot's own gate: what its sender needs. The linked Gmail must be
+/// live; the domain address must be set. hireme keeps no send cap of its own:
+/// the providers' limits are theirs, and a send they refuse comes back as the
+/// mission's last_error.
 pub fn mail_gate(rows: &Rows, ctx: &Ctx, mission: u32, key_id: u32) -> Result<(), Refusal> {
-    if !mailbox_live(rows) {
-        return Err(answer(rows, ctx, "mailbox", mission, Some(key_id)));
+    let domain = missions(rows).is_some_and(|t| domain_sender(t, mission));
+    if domain && domain_from(rows).is_none() {
+        return Err(answer(rows, ctx, "domain_sender", mission, Some(key_id)));
     }
-    let (cap, used, resets) = quota(rows, ctx.now);
-    if used >= cap {
-        let mut r = answer(rows, ctx, "cap", mission, Some(key_id));
-        r.data["cap"] = json!(cap);
-        r.data["used"] = json!(used);
-        r.data["resets_at"] = json!(crate::time_iso(resets));
-        return Err(r);
+    if !domain && !mailbox_live(rows) {
+        return Err(answer(rows, ctx, "mailbox", mission, Some(key_id)));
     }
     Ok(())
 }
@@ -803,7 +790,8 @@ pub fn landed(rows: &Rows, ctx: &Ctx, mission: u32, gmail: (Val, Val)) -> Result
         let cc = crate::outreach::addrs(&text(t, mission, M::CC)).unwrap_or_default();
         let refs: Vec<String> = text(t, mission, M::REFS).split_whitespace().map(String::from).collect();
         let body = text(t, mission, M::DRAFT).into_owned();
-        let from = rows.first(table::MAILBOXES).and_then(|(mb, id)| mb.str(id, MB::ADDRESS)).unwrap_or("");
+        // The record names who it went out as: the domain address, or the linked Gmail.
+        let from = if domain_sender(t, mission) { domain_from(rows) } else { rows.first(table::MAILBOXES).and_then(|(mb, id)| mb.str(id, MB::ADDRESS)) }.unwrap_or("");
         let shot = crate::outreach::Shot {
             mission_id: mission,
             application_id: app,
@@ -1172,9 +1160,15 @@ pub fn put(rows: &Rows, ctx: &Ctx, op_table: u16, target: u32, row: &mut Row) ->
         }
         table::MAILBOXES => {
             let only = |cols: &[u16]| row.cells.iter().all(|c| cols.contains(&c.0));
-            let ok = if mail { only(&[MB::PROVIDER, MB::ADDRESS]) } else { ctx.human && only(&[MB::DAILY_CAP]) };
+            let ok = if mail { only(&[MB::PROVIDER, MB::ADDRESS]) } else { ctx.human && only(&[MB::DOMAIN_FROM]) };
             if !ok {
                 return Err(no(refusal::SCOPE, json!({"need": if ctx.human { "mail" } else { "operator or mail" }, "table": "mailboxes"})));
+            }
+            // The domain address is one bare address, as the outreach type reads one.
+            if let Some(EVal::Val(Val::Str(a))) = given(row, MB::DOMAIN_FROM)
+                && !crate::outreach::addrs(&a).is_ok_and(|v| v.len() == 1)
+            {
+                return Err(no(refusal::TYPE, json!({"table": "mailboxes", "column": "domain_from", "reason": "one address, name@domain"})));
             }
             Ok(())
         }
@@ -1259,7 +1253,7 @@ pub fn now(rows: &Rows, req: &Json, today: crate::Day) -> i64 {
 }
 
 /// The mission and fire reads: `ranges`, `missions`, `mission_brief`,
-/// `fire_review`, `live_keys`, `mail_quota`.
+/// `fire_review`, `live_keys`.
 pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Json, Refusal> {
     let now = now(rows, req, today);
     match op {
@@ -1312,7 +1306,7 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
                 "produces": if email { "an email sent through the linked mailbox, and its replies, filed by the mail" } else { "nothing hireme can see: the shot is yours to perform" },
                 "report": if email { "none: the node reports the send (landed or failed)" } else { "once done: landed on the mission (failed, with the reason, if it did not go), then the outreach item its brief describes, naming the mission" },
                 "track": if email { "replies arrive on the mission's thread" } else { "a confirmation mail confirms the shot (it stays provisional until one is filed)" },
-                "quota": if email { let (cap, used, resets) = quota(rows, now); json!({"cap": cap, "used": used, "resets_at": crate::time_iso(resets)}) } else { Json::Null },
+                "sender": if email { json!(if domain_sender(t, id) { domain_from(rows).unwrap_or("the domain address (not set)") } else { rows.first(table::MAILBOXES).and_then(|(m, i)| m.str(i, MB::ADDRESS)).unwrap_or("the linked Gmail (not linked)") }) } else { Json::Null },
             }))
         }
         "fire_review" => {
@@ -1339,10 +1333,6 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
             let keys: Vec<Json> = key_list(rows, now, all).iter().map(|k| key_json(rows, &cvs, k, now)).collect();
             Ok(json!({"keys": keys}))
         }
-        "mail_quota" => {
-            let (cap, used, resets) = quota(rows, now);
-            Ok(json!({"cap": cap, "used": used, "left": cap.saturating_sub(used), "resets_at": crate::time_iso(resets)}))
-        }
         other => Err(no(refusal::NOT_FOUND, json!({"method": other}))),
     }
 }
@@ -1351,14 +1341,13 @@ pub fn query(rows: &Rows, op: &str, req: &Json, today: crate::Day) -> Result<Jso
 pub fn reads(op: &str) -> &'static [&'static str] {
     match op {
         "ranges" => &[],
-        "mail_quota" => &["missions", "mailboxes"],
         "mission_brief" | "fire_review" => &["missions", "applications"],
         "live_keys" => &["fire_keys", "missions"],
         _ => &["missions"],
     }
 }
 
-pub const OPS: [&str; 6] = ["ranges", "missions", "mission_brief", "fire_review", "live_keys", "mail_quota"];
+pub const OPS: [&str; 5] = ["ranges", "missions", "mission_brief", "fire_review", "live_keys"];
 
 #[cfg(test)]
 mod tests {

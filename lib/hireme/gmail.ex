@@ -273,7 +273,7 @@ defmodule Hireme.Gmail do
     Repo.with_account(account_id, fn ->
       Repo.all(
         from(m in Hireme.Rows.Mission,
-          where: m.kind == :email and m.state == :in_flight,
+          where: m.kind == :email and m.state == :in_flight and m.sender != :domain,
           order_by: m.id
         )
       )
@@ -708,7 +708,12 @@ defmodule Hireme.Gmail do
     Enum.each(deltas, fn
       {:put, %{name: "missions"}, %{state: :in_flight} = m, changed}
       when Outreach.is_email_mission(m) ->
-        if changed == :all or :state in changed, do: Session.fire(account_id, m.id)
+        cond do
+          changed != :all and :state not in changed -> :ok
+          # The domain address goes through Cloudflare, with or without a Gmail link.
+          Map.get(m, :sender) == :domain -> Task.start(fn -> send_domain(account_id, m.id) end)
+          true -> Session.fire(account_id, m.id)
+        end
 
       {:put, %{name: "mailboxes"}, %{status: :unlinked}, changed} ->
         if changed == :all or :status in changed,
@@ -733,6 +738,175 @@ defmodule Hireme.Gmail do
   def command(account_id, name, target, values) do
     c = Schema.command(name)
     run(account_id, encode(:command, c.id, target, Map.new(c.params, &{&1.name, &1}), values, 0))
+  end
+
+  # ------------------------------------------------------------ the domain sender
+
+  @doc """
+  Sends email mission `id` as the account's domain address through Cloudflare
+  Email Sending (docs/mail/sender.md). Cloudflare mints the Message-ID, so the
+  order is send, stamp what it answered, land. A refusal is the mission's
+  last_error in the provider's words: a rate limit is Cloudflare's, not
+  hireme's, which keeps no cap of its own.
+  """
+  @spec send_domain(pos_integer, pos_integer) :: term
+  def send_domain(account_id, id) do
+    m = Repo.with_account(account_id, fn -> Repo.get(Hireme.Rows.Mission, id) end)
+    from = with %Mailbox{domain_from: a} when is_binary(a) <- mailbox(account_id), do: a
+
+    cond do
+      not match?(%{state: :in_flight, sender: :domain}, m) -> :ok
+      # Stamped: Cloudflare took it; only the landing was lost.
+      is_binary(m.message_id) -> command(account_id, "landed", id, %{})
+      not is_binary(from) -> failed(account_id, id, "no domain address is set (Account → Mail)")
+      true -> domain_shot(account_id, m, from)
+    end
+  end
+
+  defp domain_shot(account_id, m, from) do
+    shot = Email.shot(Map.from_struct(m), from)
+
+    with {:ok, files} <- domain_cv(account_id, m),
+         {:ok, message_id} <- cloudflare_send(domain_payload(account_id, shot, from, files)) do
+      {:ok, _} =
+        command(account_id, "stamp", m.id, %{
+          message_id: String.trim(message_id, "<") |> String.trim_trailing(">")
+        })
+
+      command(account_id, "landed", m.id, %{})
+    else
+      {:error, why} -> failed(account_id, m.id, why)
+    end
+  end
+
+  defp domain_payload(account_id, shot, from, files) do
+    name =
+      Repo.one(from(a in Hireme.Rows.Account, where: a.id == ^account_id, select: a.name),
+        skip_account: true
+      )
+
+    bracket = &if(String.starts_with?(&1, "<"), do: &1, else: "<#{&1}>")
+
+    headers =
+      %{}
+      |> then(
+        &if(shot.in_reply_to,
+          do: Map.put(&1, "In-Reply-To", bracket.(shot.in_reply_to)),
+          else: &1
+        )
+      )
+      |> then(
+        &if(shot.refs != [],
+          do: Map.put(&1, "References", Enum.map_join(shot.refs, " ", bracket)),
+          else: &1
+        )
+      )
+
+    %{
+      from: if(name, do: %{address: from, name: name}, else: %{address: from}),
+      to: Email.recipients(shot),
+      subject: shot.subject || "",
+      text: shot.body || "",
+      headers: headers,
+      attachments:
+        Enum.map(
+          files,
+          &%{
+            filename: &1.name,
+            type: &1.type,
+            disposition: "attachment",
+            content: Base.encode64(&1.data)
+          }
+        )
+    }
+    |> then(&if(Email.copies(shot) != [], do: Map.put(&1, :cc, Email.copies(shot)), else: &1))
+  end
+
+  defp domain_cv(_, %{cv_version_id: nil}), do: {:ok, []}
+
+  defp domain_cv(account_id, %{cv_version_id: version}) do
+    with %{blob_sha: sha} = v when is_binary(sha) <-
+           Repo.with_account(account_id, fn -> Repo.get(Hireme.Rows.CvVersion, version) end),
+         %{data: data, type: type} <-
+           Repo.with_account(account_id, fn -> Hireme.Blobs.about(sha, [:data]) end) do
+      {:ok, [%{name: v.blob_name || "cv", type: type, data: data}]}
+    else
+      _ -> {:error, "cv_file: the CV the key covered has no file to attach"}
+    end
+  end
+
+  # Cloudflare Email Sending's REST API: the Message-ID it minted, or its own
+  # words for why not (a 429 is its rate limit, named as such).
+  defp cloudflare_send(payload) do
+    config = Application.get_env(:hireme, Hireme.Mail, [])
+
+    if config[:account_id] && config[:api_token] do
+      Req.new(
+        url:
+          "https://api.cloudflare.com/client/v4/accounts/#{config[:account_id]}/email/sending/send",
+        auth: {:bearer, config[:api_token]},
+        retry: false,
+        receive_timeout: 30_000
+      )
+      |> Req.merge(Keyword.get(config, :request_options, []))
+      |> Req.post(json: payload)
+      |> case do
+        {:ok,
+         %Req.Response{
+           status: s,
+           body: %{"success" => true, "result" => %{"permanent_bounces" => [_ | _] = b}}
+         }}
+        when s in 200..299 ->
+          {:error, "cloudflare: permanent bounce for #{Enum.join(b, ", ")}"}
+
+        {:ok,
+         %Req.Response{status: s, body: %{"success" => true, "result" => %{"message_id" => id}}}}
+        when s in 200..299 and is_binary(id) ->
+          {:ok, id}
+
+        {:ok, %Req.Response{status: 429}} ->
+          {:error,
+           "cloudflare: rate limit exceeded (429, the provider's limit, not hireme's): fire it again in a while"}
+
+        {:ok, %Req.Response{status: s, body: body}} ->
+          words = with %{"errors" => [%{"message" => w} | _]} <- body, do: w
+          {:error, "cloudflare: #{if is_binary(words), do: words, else: "HTTP #{s}"} (#{s})"}
+
+        {:error, why} ->
+          {:error, "cloudflare: #{inspect(why)}"}
+      end
+    else
+      {:error, "cloudflare: Email Sending is not configured on this node"}
+    end
+  end
+
+  defp failed(account_id, id, reason),
+    do: command(account_id, "failed", id, %{reason: Security.clip(reason)})
+
+  @doc """
+  A domain shot found in flight, unstamped, five minutes after it went (a
+  restart, a lost task) may or may not have left: never sent again on its own.
+  It is failed with that said, so a person looks before firing it again.
+  """
+  def domain_sweep do
+    cutoff = DateTime.add(DateTime.utc_now(), -300)
+
+    Repo.all(
+      from(m in Hireme.Rows.Mission,
+        where:
+          m.kind == :email and m.state == :in_flight and m.sender == :domain and
+            is_nil(m.message_id) and m.in_flight_at < ^cutoff,
+        select: {m.account_id, m.id}
+      ),
+      skip_account: true
+    )
+    |> Enum.each(fn {a, id} ->
+      failed(
+        a,
+        id,
+        "outcome unknown: the node lost this domain send (a restart?); check the recipient's thread before firing it again"
+      )
+    end)
   end
 
   @doc "Puts `values` into `table` as the mail actor (a singleton's one row)."
@@ -823,6 +997,7 @@ defmodule Hireme.Gmail.Keeper do
 
     try do
       Hireme.Gmail.sweep()
+      Hireme.Gmail.domain_sweep()
       Hireme.Gmail.resume()
     rescue
       e -> Logger.error("gmail keeper: #{inspect(e.__struct__)}")

@@ -355,6 +355,78 @@ defmodule Hireme.GmailSessionTest do
   defp labels(%{labels: nil}), do: []
   defp labels(%{labels: l}), do: String.split(l, <<0x1F>>)
 
+  # docs/mail/sender.md: the domain address goes out through Cloudflare, Gmail linked or not.
+  test "a domain-sender email goes out through Cloudflare as the domain address with its CV, stamped with the Message-ID Cloudflare minted; Cloudflare's rate limit comes back as Cloudflare's",
+       %{account: a, operator: operator} do
+    me = self()
+    before = Application.get_env(:hireme, Hireme.Mail)
+
+    minted = %{
+      "success" => true,
+      "result" => %{
+        "delivered" => ["jobs@acme.example"],
+        "permanent_bounces" => [],
+        "queued" => [],
+        "message_id" => "<cf.1@anghel4d.example>"
+      }
+    }
+
+    throttled = %{"success" => false, "errors" => [%{"code" => 10_004, "message" => "throttled"}]}
+    {:ok, replies} = Agent.start_link(fn -> [{429, throttled}, {200, minted}] end)
+
+    cloudflare = fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(me, {:cloudflare, JSON.decode!(body)})
+      {status, reply} = Agent.get_and_update(replies, fn [h | t] -> {h, t} end)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(status, JSON.encode!(reply))
+    end
+
+    Application.put_env(:hireme, Hireme.Mail,
+      adapter: Swoosh.Adapters.Test,
+      account_id: "acct",
+      api_token: "token",
+      request_options: [plug: cloudflare]
+    )
+
+    on_exit(fn -> Application.put_env(:hireme, Hireme.Mail, before) end)
+
+    # No Gmail link at all: the row holds only the address, and the domain the operator set.
+    {:ok, _} = Gmail.put(a.id, "mailboxes", %{provider: :gmail, address: @user})
+    domain = op(:put, :mailboxes, %{domain_from: "ana@anghel4d.example"}, target: box().id)
+    {[_], []} = run(a.id, domain, operator)
+
+    {app, mail} = staged(a, nil)
+    cells = %{application_id: app, kind: :email, target: "jobs@acme.example", state: :fire_ready}
+    cells = Map.merge(cells, Map.put(mail, :sender, :domain))
+    {[%{id: m}], []} = run(a.id, op(:put, :missions, cells))
+    key = key(a, m, operator)
+
+    fire(a, m, key, operator)
+    assert_receive {:cloudflare, sent}, 5_000
+
+    assert sent["from"]["address"] == "ana@anghel4d.example" and
+             sent["to"] == ["jobs@acme.example"]
+
+    assert [%{"filename" => "ana-cv.pdf", "type" => "application/pdf"}] = sent["attachments"]
+
+    assert eventually(fn ->
+             mission(m).state == :fire_ready and
+               mission(m).last_error =~ "the provider's limit, not hireme's"
+           end)
+
+    # Still covered: the failed shot is unburned, and the next one lands.
+    fire(a, m, key, operator)
+    assert_receive {:cloudflare, _}, 5_000
+    assert eventually(fn -> mission(m).state == :fired end)
+    assert mission(m).message_id == "cf.1@anghel4d.example"
+
+    assert %{from_addr: "ana@anghel4d.example", direction: :outbound} =
+             item("cf.1@anghel4d.example")
+  end
+
   test "linking checks the password with one login, seals it, and the first sync makes the mailbox live, reading back the backfill's window and no further",
        %{account: a, fake: fake} do
     assert {:error, :address} = Gmail.link(a.id, "someone@example.com", @password)

@@ -16,7 +16,7 @@
 import type { View } from "../app.ts"
 import { create, get, supported, why } from "../auth/webauthn.ts"
 import { DOMAIN } from "../gen/schema.ts"
-import { Refused, ask, ids, page, rpc, value, type Row } from "../kernel.ts"
+import { Refused, ask, ids, page, put, rpc, value, type Row } from "../kernel.ts"
 import { EMPTY, attempt, entries, fields, flag, html, resetIfUnchanged, str, trusted, type Html } from "../morph.ts"
 import { detail } from "./trail.ts"
 import { go, model, notice, set, type AccountView } from "../state.ts"
@@ -198,6 +198,7 @@ function mail(): Html {
     ${linked
       ? html`<p><b>${str(m!.address)}</b> ${tag}${sync}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
         ${status === "auth_failed" ? html`<p class="error">${str(m!.last_error) || MAIL_ERR.auth} Link it again with a new app password.</p>` : status === "error" && m!.last_error ? html`<p class="muted">${MAIL_ERR[str(m!.last_error)] ?? str(m!.last_error)}; retrying.</p>` : EMPTY}
+        <form class="row" data-submit="mail-domain" data-act="mail-domain" data-key="mail-domain"><label>Domain address <input name="domain_from" type="email" placeholder="you@your-domain" value="${str(m!.domain_from)}"></label><button>Save</button><span class="hint">An email whose sender is the domain goes out as this address, through Cloudflare Email Sending.</span></form>
         <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" data-act="mail-check">Send a test mail</button><button type="button" class="ghost" data-act="mail-pipe">Domain pipe secret</button><button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
       : html`<p class="muted">Link your Gmail: replies to your applications file themselves here, and mail sent from hireme sits in Gmail's Sent. hireme reads only the job search's mail, labels it hireme, and never moves, archives or deletes anything.</p>`}
     ${v().open === "mail" ? form : linked ? EMPTY : html`<button type="button" data-act="open" data-form="mail">Link Gmail</button>`}
@@ -582,6 +583,15 @@ function act(name: string, el: HTMLElement): void {
       const box = form.elements.namedItem("app_password") as HTMLInputElement | null
       if (box) box.value = ""
       return void linkMail((f.address ?? "").trim(), password)
+    }
+    case "mail-domain": {
+      // The operator's own write (human_only): the domain address a domain-sender email goes out as.
+      const box = mailbox()
+      if (!box) return
+      const address = (f.domain_from ?? "").trim()
+      return void put("mailboxes", { domain_from: address === "" ? null : address }, { id: Number(box.id) })
+        .then(() => notice("ok", address ? `Domain emails go out as ${address}.` : "Domain address cleared."))
+        .catch((e) => notice("error", e instanceof Refused ? "That is not one address, name@domain." : "Saving failed."))
     }
     case "mail-check":
       return void call("account.mail.check", {}, (r) => notice("ok", mailChecked(r)))

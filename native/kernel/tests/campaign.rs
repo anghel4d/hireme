@@ -193,7 +193,7 @@ fn start(w: World) -> Sim {
         replies: vec![],
         requests: vec![],
         mailbox: true,
-        cap_reset: None,
+        domain_from: false,
         applied: None,
         corp: Some("acme.example".into()),
     };
@@ -354,7 +354,7 @@ impl Sim {
         });
         let threaded = answers.is_some() || (role == Role::Nudge && primary_id.is_some());
         let id = self.id();
-        self.f.missions.push(Mission { id, kind, state: MState::Draft, role, target, contact, draft_len: 200, hold: None, covered: None, revoked: false, last_error: None, provisional: false, fired: None, message_id: None, answers, threaded });
+        self.f.missions.push(Mission { id, kind, state: MState::Draft, role, target, contact, draft_len: 200, domain: kind == Kind::Email && self.f.channel == Channel::Cold, hold: None, covered: None, revoked: false, last_error: None, provisional: false, fired: None, message_id: None, answers, threaded });
         Ok(())
     }
 
@@ -457,6 +457,13 @@ impl Sim {
     fn ask(&mut self, a: &Ask) -> Result<(), String> {
         match a {
             Ask::Held | Ask::Mailbox => return Err(format!("{a:?}: the model never holds or unlinks")),
+            // The operator sets the domain address a cold email goes out as.
+            Ask::DomainFrom => {
+                if self.f.domain_from {
+                    return Err("asked for the domain address while it is set".into());
+                }
+                self.f.domain_from = true;
+            }
             Ask::Gate => self.f.gate = Some(if self.w.pursue { Gate::Pursue } else { Gate::Skip }),
             Ask::Prior => {
                 if self.w.ledger == Ledger::WentOut {
@@ -787,7 +794,7 @@ fn desk_rows(apps: Json, missions: Json, pdf: bool, default: bool) -> Kernel {
         "cv_roots": [{"id": 1, "slug": "main", "name": "Main", "format": if pdf { "pdf" } else { "markdown" }, "version_id": 5}],
         "cv_versions": [{"id": 5, "root_id": 1, "n": 1, "blob_sha": if pdf { "5f1e9b" } else { "" }, "actor": "operator"}],
         "me": [{"id": 1, "cv_default_root_id": if default { serde_json::json!(1) } else { Json::Null }}],
-        "mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "live", "daily_cap": 20}],
+        "mailboxes": [{"id": 1, "provider": "gmail", "address": "ana@example.com", "status": "live"}],
     }))
 }
 

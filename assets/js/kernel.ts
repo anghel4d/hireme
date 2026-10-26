@@ -294,7 +294,7 @@ function indexed<K, V>(store: Map<K, { version: number; at: V }>, key: K, build:
   return s.at
 }
 
-type Read = "find" | "get" | "history" | "cv_picks" | "mask_check" | "mask_fields" | "outreach" | "mail_quota" | "live_keys" | "fire_review"
+type Read = "find" | "get" | "history" | "cv_picks" | "mask_check" | "mask_fields" | "outreach" | "live_keys" | "fire_review"
 
 /**
  * A read of the replica, in the input's frame: World's find, get and history and the kernel's own

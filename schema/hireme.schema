@@ -168,6 +168,9 @@ enum language_level a1 a2 b1 b2 c1 c2 native
 # select still name it.
 enum mission_kind email careers_page linkedin x_dm discord other
 enum mission_state draft draft_ready fire_ready in_flight fired cancelled
+# Who an email mission goes out as: the linked Gmail, or the account's domain
+# address through Cloudflare Email Sending (docs/mail/sender.md).
+enum sender gmail domain
 enum confirmation provisional confirmed
 enum request_status open granted declined
 enum prior_send applied not_applied
@@ -946,6 +949,8 @@ table missions desk resident
   # The CV version the shot carries, as the application's pick named it
   # when it was fired: the one the key's hash covered.
   col cv_version_id ref cv_versions ? readonly
+  # An email's sender, chosen with its draft and locked once it is sent.
+  col sender enum sender ! = gmail
   # Starts a shot, under a live key covering the mission.
   command fire key:u32?
   command stamp message_id
@@ -1001,7 +1006,8 @@ table mailboxes mail resident singleton
   col status enum mailbox_status ! = linking readonly
   col last_sync_at time ? readonly
   col last_error text ? readonly
-  col daily_cap u32 ! = 25 human_only
+  # daily_cap: hireme sets no send cap; the providers keep their own.
+  retired col 1
   # The domain pipe's public id (12 base62): the node resolves an account by it.
   col pipe_id str ? server_only
   col secret bytes ? server_only
@@ -1013,5 +1019,7 @@ table mailboxes mail resident singleton
   # a hang: messages walked of those its window listed; cleared once live.
   col sync_done u32 ? readonly
   col sync_total u32 ? readonly
+  # The domain address an email mission with sender domain goes out as.
+  col domain_from str ? human_only
   command mailbox_state status last_error? last_sync_at?
   command unlink_mail human_only

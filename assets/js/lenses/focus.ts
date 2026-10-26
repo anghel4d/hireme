@@ -200,7 +200,7 @@ const COPY = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" st
 
 // ------------------------------------------------------------------ missions: the routes it goes out by
 
-type Mission = { id: number; kind: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; cv_version_id: number | null; covered_by: number[]; hold: string | null }
+type Mission = { id: number; kind: string; sender: string; target: string | null; cc: string | null; subject: string | null; draft: string | null; in_reply_to: string | null; state: string; last_error: string | null; fired_at: string | null; fired_by: string | null; fire_key_id: number | null; in_flight_at: string | null; confirmation: string | null; cv_version_id: number | null; covered_by: number[]; hold: string | null }
 
 /** The commander's answer to a refused shot, as a sentence: why, and what the key still holds. */
 export function commander(d: Row): string {
@@ -212,7 +212,7 @@ export function commander(d: Row): string {
     revoked: `key #${str(d.key)} was revoked`,
     out_of_scope: `key #${str(d.key)} does not cover it`,
     not_yours: `key #${str(d.key)} is for another API key`,
-    cap: "today's send cap is reached",
+    domain_sender: "it goes out as the domain address, and none is set (Account → Mail)",
     mailbox: "Gmail is not linked and live",
   }
   const left = d.key ? ` Key #${str(d.key)} has ${str(d.remaining) || "nothing"} left${d.expires_in ? `, ${str(d.expires_in)} to go` : ""}.` : ""
@@ -223,13 +223,21 @@ export function commander(d: Row): string {
 const STAGED = ["draft", "draft_ready", "fire_ready", "cancelled"]
 
 /** A mission's compose: an email's To, Cc, subject and body are the mission itself, as its key's hash freezes them. */
+/** Who an email goes out as, by the account's mailbox row: the linked Gmail, or the domain address. */
+function senders(): Record<string, string> {
+  const box = ask<{ rows: Row[] }>("find", { table: "mailboxes", limit: 1 })?.rows[0]
+  return { gmail: `Gmail · ${str(box?.address) || "not linked"}`, domain: `Domain · ${str(box?.domain_from) || "not set (Account → Mail)"}` }
+}
+
 function compose(m: Mission, appId: number): Html {
   const email = m.kind === "email"
+  const from = senders()
   const moved = Number(row("missions", m.id)?.rev ?? 0) !== v().editRev
   return html`<form class="stack" data-submit="save-mission" data-act="save-mission" data-mission="${m.id}" data-id="${appId}">
     ${m.covered_by.length > 0 ? html`<p class="warn">Key #${m.covered_by[0]} covers this mission as it reads now: a saved edit takes it out of that key.</p>` : EMPTY}
     ${moved ? html`<p class="notice" role="alert">This mission changed after you opened it; saving will be refused rather than overwrite the change.</p>` : EMPTY}
     <label>${email ? "To (up to 10, comma-separated)" : "Target (a URL or a handle)"} <input name="target" value="${m.target ?? ""}"${flag("required", email)}></label>
+    ${email ? html`<label>From <select name="sender">${Object.entries(from).map(([k, label]) => html`<option value="${k}"${flag("selected", k === m.sender)}>${label}</option>`)}</select></label>` : EMPTY}
     ${email ? html`<label>Cc <input name="cc" value="${m.cc ?? ""}"></label><label>Subject <input name="subject" value="${m.subject ?? ""}" required></label>` : EMPTY}
     <label>${email ? "Body" : "Draft (markdown: a form's fields, a message's text)"} <textarea name="draft" rows="12" data-autofocus>${m.draft ?? ""}</textarea></label>
     <span class="row"><button class="primary">Save</button><button type="button" class="ghost" data-act="cancel">Cancel</button></span></form>`
@@ -238,7 +246,7 @@ function compose(m: Mission, appId: number): Html {
 function missions(d: Doc, appId: number): Html {
   const cv = d.cv.file
   const ms = d.missions ?? []
-  const quota = ask<{ cap: number; left: number }>("mail_quota")
+  const from = senders()
   return html`<section class="card" data-key="missions"><h2>Missions</h2>
     ${ms.length === 0 ? html`<p class="hint">No route yet: add one below (the hiring address, the careers page, a message).</p>` : EMPTY}
     <ul class="rows">${ms.map((m) => {
@@ -253,6 +261,7 @@ function missions(d: Doc, appId: number): Html {
       ${staged ? html`<select data-act="mission-state" data-on="change" data-mission="${m.id}" aria-label="State">${STAGED.map((x) => html`<option value="${x}"${flag("selected", x === m.state)}>${x.replace("_", " ")}</option>`)}</select>
         <button type="button" class="ghost" data-act="mission-edit" data-mission="${m.id}">Edit</button>` : html`<span class="tag">${m.state.replace("_", " ")}</span>`}
       ${email && m.subject ? html`<p>${m.subject}</p>` : EMPTY}
+      ${email ? html`<p class="muted">${staged ? "From" : "Sent as"} ${from[m.sender] ?? m.sender}</p>` : EMPTY}
       ${first && cv ? html`<p class="muted">The picked CV: v${cv.n} · ${cv.format}</p>` : EMPTY}
       ${m.hold && staged && m.hold !== "not_ready" ? html`<p class="warn">Cannot fire: ${HOLD[m.hold] ?? m.hold}.</p>` : EMPTY}
       ${m.confirmation === "provisional" ? html`<span class="tag warn" title="Self-reported: it counts once a confirmation mail arrives">provisional</span>` : EMPTY}
@@ -261,7 +270,7 @@ function missions(d: Doc, appId: number): Html {
       ${ready ? html`<div class="actions">
         <button type="button" class="danger" data-act="mission-fire" data-mission="${m.id}" data-kind="${m.kind}"${flag("disabled", !covered)} title="${covered ? `Under key #${m.covered_by[0]}` : "No live fire key covers this mission"}">${email ? "Send" : "Fire"}</button>
         ${covered ? EMPTY : html`<a class="ghost" href="/fire?missions=${m.id}" data-nav>Authorize</a>`}
-        ${email && quota ? html`<span class="muted">${quota.left} of ${quota.cap} left today</span>` : EMPTY}</div>` : EMPTY}
+</div>` : EMPTY}
       ${m.state === "in_flight" && !email ? html`<div class="actions"><span class="muted">Submitted by hand? Report it.</span>
         <button type="button" data-act="mission-landed" data-mission="${m.id}">It went out</button>
         <form class="row grow" data-submit="mission-failed" data-mission="${m.id}"><input name="reason" placeholder="Or what refused it" aria-label="Why it failed" required><button class="ghost">It failed</button></form></div>` : EMPTY}
@@ -396,7 +405,7 @@ export function act(name: string, el: HTMLElement, appId_: number): void {
     case "save-mission": {
       const blank = (x: unknown): Input => (str(x).trim() === "" ? null : str(x).trim())
       const set: Record<string, Input> = { target: blank(f.target), draft: (f.draft ?? "") === "" ? null : (f.draft as Input) }
-      if ("subject" in f) Object.assign(set, { cc: blank(f.cc), subject: blank(f.subject) })
+      if ("subject" in f) Object.assign(set, { cc: blank(f.cc), subject: blank(f.subject), sender: str(f.sender) || "gmail" })
       return void put("missions", set, { id: Number(el.dataset.mission), expectRev: v().editRev }).then(() => patch({ edit: "" })).catch(failed)
     }
     case "mission-state": {

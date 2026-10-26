@@ -193,6 +193,8 @@ pub struct Mission {
     pub target: String,
     pub contact: Option<u32>,
     pub draft_len: usize,
+    /// An email that goes out as the domain address, not the linked Gmail.
+    pub domain: bool,
     /// Why it cannot fire whoever asks (fire::hold), for one fire_ready.
     pub hold: Option<&'static str>,
     /// The live key covering it.
@@ -296,8 +298,8 @@ pub struct Facts {
     pub replies: Vec<Reply>,
     pub requests: Vec<Request>,
     pub mailbox: bool,
-    /// Today's email cap is used: it resets this day.
-    pub cap_reset: Option<Day>,
+    /// The account's domain address is set: a domain-sender email can go.
+    pub domain_from: bool,
     pub applied: Option<Day>,
     /// The corporation's domain, for a contact's put.
     pub corp: Option<String>,
@@ -372,6 +374,8 @@ pub enum Ask {
     /// The operator declined the request: theirs to lift, once the drafts are revised.
     Declined(u32),
     Mailbox,
+    /// A domain-sender email, and the account has no domain address set.
+    DomainFrom,
     /// A shot the agent could not get through: the operator sends it by hand.
     ByHand(u32),
     /// A reply that names no address or contact to answer it through.
@@ -785,10 +789,11 @@ fn fire(f: &Facts, b: &mut Build, m: &Mission) -> (Phase, Next) {
     if let Some(until) = f.heat.filter(|_| !f.out()) {
         return (P::Fire, Next::Wait { until: Some(until), why: "heat" });
     }
-    if m.kind == Kind::Email && !f.mailbox {
+    // An email goes out as its sender: the linked Gmail, or the domain address.
+    if m.kind == Kind::Email && m.domain && !f.domain_from {
+        (P::Fire, Next::Ask(Ask::DomainFrom))
+    } else if m.kind == Kind::Email && !m.domain && !f.mailbox {
         (P::Fire, Next::Ask(Ask::Mailbox))
-    } else if m.kind == Kind::Email && f.cap_reset.is_some() {
-        (P::Fire, Next::Wait { until: f.cap_reset, why: "cap" })
     } else {
         (P::Fire, Next::Do(Act::Fire { mission: m.id, key }))
     }
@@ -1005,6 +1010,11 @@ fn mission_args(f: &Facts, w: &Want) -> Json {
                 }
                 _ => a["subject"] = json!(alloc::format!("{} application", f.role)),
             }
+            // The draft's starting sender (docs/mail/sender.md): a cold email as the domain
+            // address, everything an application sends as the linked Gmail. Changeable until sent.
+            if f.channel == Channel::Cold {
+                a["from"] = json!("domain");
+            }
             a["draft"] = json!(match w.role {
                 Role::Nudge => "<a short follow-up: still keen, one new detail>",
                 Role::Reply(_) => "<the answer: for an interview, two or three times>",
@@ -1045,6 +1055,7 @@ fn ask_text(f: &Facts, a: &Ask) -> (String, String) {
         Ask::Revoked(m) => (alloc::format!("the operator revoked the key for {}: stand down; ask them whether it goes out at all before requesting another", refs::mission(m)), "a revoked key is the operator's decision; nothing requests it again on its own"),
         Ask::Declined(r) => (alloc::format!("{} was declined: revise the drafts, then ask the user before requesting again", refs::request(r)), "the operator said no to these drafts; only they can say what changed"),
         Ask::Mailbox => ("link Gmail (Account → Mail) so the mail can go".into(), "no live mailbox"),
+        Ask::DomainFrom => ("set the domain address (Account → Mail) the domain-sender emails go out as, or switch the email's sender to gmail".into(), "no domain address on file"),
         Ask::ByHand(m) => {
             let m = f.missions.iter().find(|x| x.id == *m);
             let (id, target, error) = (m.map_or(0, |m| m.id), m.map_or("", |m| m.target.as_str()), m.and_then(|m| m.last_error.as_deref()).unwrap_or("failed"));
@@ -1075,7 +1086,6 @@ pub fn json(f: &Facts, s: &Step) -> Json {
         Next::Wait { until, why } => {
             let text = match *why {
                 "heat" => alloc::format!("the company's heat is over its cap; nothing on {} until then, or the operator overrides", app_ref(f)),
-                "cap" => "today's 25 mails are out; the cap resets tomorrow".into(),
                 "sending" => "the node is sending the mail; it reports the outcome itself".into(),
                 // What the follow-up's date is: the next nudge, or the close.
                 "nudge" => match (f.nudge_to(), until) {
@@ -1132,7 +1142,7 @@ pub struct Index<'r> {
     file_root: Option<u32>,
     newest: Option<u32>,
     mailbox: bool,
-    cap_reset: Option<Day>,
+    domain_from: bool,
     today: Day,
     now: i64,
 }
@@ -1188,7 +1198,6 @@ impl<'r> Index<'r> {
             .collect();
         let file_root = versioned.iter().filter(|r| r.1).map(|r| r.0).max();
         let newest = versioned.iter().map(|r| r.0).max();
-        let (cap, used, resets) = fire::quota(rows, now);
         Index {
             rows,
             cvs: Cvs::of(rows),
@@ -1200,7 +1209,7 @@ impl<'r> Index<'r> {
             file_root,
             newest,
             mailbox: fire::mailbox_live(rows),
-            cap_reset: (used >= cap).then(|| day_of(resets)),
+            domain_from: fire::domain_from(rows).is_some(),
             today,
             now,
         }
@@ -1314,7 +1323,7 @@ impl<'r> Index<'r> {
             replies,
             requests,
             mailbox: self.mailbox,
-            cap_reset: self.cap_reset,
+            domain_from: self.domain_from,
             applied: code(A::APPLIED_ON).map(|d| d as Day),
             corp: corp.and_then(|c| rows.table(table::CORPORATIONS).and_then(|t| t.str(c, schema::col::corporations::DOMAIN))).map(String::from),
         })
@@ -1389,6 +1398,7 @@ impl<'r> Index<'r> {
                     target: t.str(id, M::TARGET).unwrap_or("").to_string(),
                     contact,
                     draft_len: t.text(id, M::DRAFT).map_or(0, |d| d.chars().count()),
+                    domain: t.u32(id, M::SENDER) == Some(u32::from(enums::sender::DOMAIN)),
                     hold: (state == MState::FireReady).then(|| fire::hold(rows, &self.cvs, id)).flatten(),
                     covered: (state == MState::FireReady).then(|| fire::covering(rows, &self.cvs, id, self.now)).flatten(),
                     revoked: state == MState::FireReady && fire::revoked_cover(rows, id),

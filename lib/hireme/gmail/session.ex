@@ -37,7 +37,7 @@ defmodule Hireme.Gmail.Session do
   alias Hireme.{Accounts, Audit, Blobs, Gmail, Repo, Security}
   alias Hireme.Gmail.{Imap, Mime, Smtp}
   alias Hireme.Outreach.Email
-  alias Hireme.Rows.{CvVersion, Mission}
+  alias Hireme.Rows.CvVersion
 
   # Envelopes per IMAP fetch.
   @batch 100
@@ -626,8 +626,7 @@ defmodule Hireme.Gmail.Session do
   end
 
   defp transmit(s, m) do
-    with :ok <- under_cap(s),
-         {:ok, rcpts, mail} <- compose(s, m),
+    with {:ok, rcpts, mail} <- compose(s, m),
          {:ok, password} <- unsealed(s) do
       # From here the mail may reach Gmail.
       s = %{s | tried: Map.put(s.tried, m.id, now())}
@@ -777,28 +776,6 @@ defmodule Hireme.Gmail.Session do
 
   # The judge counted the shot against the cap when it fired; the node
   # counts again what landed today before it sends.
-  defp under_cap(s) do
-    today = DateTime.new!(Date.utc_today(), ~T[00:00:00], "Etc/UTC")
-
-    landed =
-      Repo.with_account(s.account_id, fn ->
-        Repo.aggregate(
-          from(m in Mission,
-            where: m.kind == :email and m.state == :fired and m.fired_at >= ^today
-          ),
-          :count
-        )
-      end)
-
-    cap = with %{daily_cap: cap} <- Gmail.mailbox(s.account_id), do: cap
-
-    if is_integer(cap) and landed < cap,
-      do: :ok,
-      else: {:refuse, "the daily cap of #{cap} sends is spent; it resets at midnight UTC"}
-  end
-
-  # What goes out is the mission as the key froze it (`Email.shot/2`), from
-  # the linked address.
   defp compose(s, m) do
     shot = Email.shot(Map.from_struct(m), s.address)
     to = Email.recipients(shot)

@@ -650,6 +650,16 @@ async fn answer(name: &str, args: Json) -> Result<Json, Json> {
     {
         answer["content"][0]["text"] = json!(format!("{t}{}", steps(&step, false, &host(|h| h.origin()))));
     }
+    // hireme sets no send cap (docs/mail/sender.md): the providers keep theirs. After an email
+    // goes, a hint to pace the next, never a block.
+    if name == "fire"
+        && answer["isError"] == false
+        && let Some(m) = args["id"].as_u64().and_then(|m| u32::try_from(m).ok())
+        && read(|k| k.rows().table(schema::table::MISSIONS).and_then(|t| t.u32(m, schema::col::missions::KIND))).ok().flatten() == Some(u32::from(schema::enums::outreach_kind::EMAIL))
+        && let Some(t) = answer["content"][0]["text"].as_str()
+    {
+        answer["content"][0]["text"] = json!(format!("{t}help: pace the emails: a minute or two between sends keeps Gmail's and Cloudflare's own rate limits clear\n"));
+    }
     Ok(answer)
 }
 
@@ -895,11 +905,7 @@ async fn missions(name: &str, args: &Json) -> Json {
     let what = format!("{name} {}", compact(args));
     let answer = match name {
         "mission" => query("mission_brief", &json!({"mission": args["id"]})).await.map(|v| ("brief", v)),
-        "fire_keys" => match (query("live_keys", &json!({})).await, query("mail_quota", &json!({})).await) {
-            (Ok(live), Ok(quota)) => Ok(("keys", json!({"live": live, "quota": quota}))),
-            (Ok(live), Err(Fail::Refused(..))) => Ok(("keys", json!({"live": live, "quota": null}))),
-            (Err(f), _) | (_, Err(f)) => Err(f),
-        },
+        "fire_keys" => query("live_keys", &json!({})).await.map(|live| ("keys", json!({"live": live}))),
         _ => query("missions", args).await.map(|v| ("list", v)),
     };
     match answer {
