@@ -63,16 +63,49 @@ Against those: Gmail SMTP carries the best reputation available, but it costs
 the app password — a full-scope bearer credential for the primary mailbox, with
 no scopes, no expiry, and a deprecation shadow (`SECURITY.md`).
 
-## The probe that settles it
+## Sending from this host: 587, not 465
 
-Not built yet. One message, identical bytes, sent through both paths — Gmail
-SMTP and `smtp.mx.cloudflare.net:465` — to a fixed set of seed mailboxes the
-operator controls (Gmail, Outlook/M365, Yahoo, Fastmail, self-hosted). Compare
-per receiver: `Authentication-Results`, `dkim=`, `dmarc=`, `Received-SPF`, the
-folder it was filed in, and the raw headers of both copies. That separates a
-domain problem from a relay problem from a content problem, which is the
-distinction every deliverability argument otherwise blurs.
+Found while chasing a link that looked stuck. `smtp.gmail.com:465` times out
+from fsn1-2 on IPv4 (checked twice, one A record at a time) while 587 answers;
+25 is blocked as well. This is the same Hetzner constraint `nixos-server`'s
+README records as why hireme's own notices go over Cloudflare's HTTPS API
+rather than SMTP. `Hireme.Gmail.Smtp` had been written for implicit TLS on 465
+only, so every send would have burned 60 seconds and failed `{:network,
+:timeout}` — and nothing would have said so until the first fire key.
 
-Decide on the result: clean, and the domain pipe plus Cloudflare sending removes
-the app password from the threat model entirely; dirty on M365 only, and Gmail
-keeps the sending half.
+`Smtp` now opens according to the endpoint: 465 implicit TLS, anything else
+plain, then EHLO, STARTTLS, `:ssl.connect` over the same socket, EHLO again
+(RFC 3207 forgets the first), then the unchanged AUTH PLAIN, envelope and DATA.
+`Hireme.Gmail.endpoint(:smtp)` defaults to 587 and `endpoint_tls/1` answers
+`:implicit` on 465, `:starttls` elsewhere. The fake Gmail speaks both modes
+(`smtp_tls:`, STARTTLS by default), so the suite and the deploy's dev check
+exercise the path production actually uses.
+
+Proven live on 2026-10-26 through the node's own link, sending as the linked
+Gmail address — the mailbox's own, since Gmail refuses a From it does not own:
+
+```
+endpoint smtp.gmail.com:587 tls=starttls from=matei3d@gmail.com
+deliver  {:ok, "2.0.0 OK … - gsmtp"}  in 2017ms
+sent folder  uid 1389
+```
+
+Gmail accepted it and filed it in `[Gmail]/Sent Mail`, which is the whole
+promise of the Gmail link: the mail lives in the operator's own mailbox as if
+written there.
+
+## What is still unproven
+
+The probe I designed earlier — one identical message down both paths to
+controlled seed mailboxes, compared on `Authentication-Results` — is still not
+built, and it is still the only thing that answers the domain question. What
+has changed is that the sending half is no longer a guess: a real message
+leaves this host and lands in Gmail's Sent.
+
+The other open item is the first sync. It is not a bug, but it is not gentle
+either: linking a mailbox whose All Mail holds 131,032 messages walks the
+180-day window (~30,000 envelopes) in about four minutes, and one transient
+Gmail drop at 99% costs a backoff and a retry before `live`. The row says
+`linking` for all of it, with no progress, which reads exactly like a hang.
+Progress (`last_uid` against `listed`) is not in the replica projection, so the
+lens has nothing to show; that is the next thing to fix here.
