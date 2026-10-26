@@ -71,6 +71,7 @@ function requests(): Html {
   return html`<section class="card" data-key="requests"><h2>Requests from agents</h2>
     <ul class="rows">${open.map((r: Row) => html`<li data-key="r${str(r.id)}"><a href="/fire/${str(r.id)}" data-nav>Request ${str(r.id)}</a>
       ${ranges(str(r.missions))} <span class="muted">${str(r.reason)}</span>
+      <a class="button primary" href="/fire/${str(r.id)}" data-nav>Review and approve</a>
       <button type="button" class="ghost" data-act="decline" data-id="${str(r.id)}">Decline</button></li>`)}</ul>
   </section>`
 }
@@ -99,8 +100,9 @@ let creating = false
 
 /** What a review address asks for: a request by id, or missions named by ranges. */
 function asked(): Record<string, unknown> | null {
-  const sub = model.address.sub
-  if (/^\d+$/.test(sub)) return { request: Number(sub) }
+  // The address parser files a numeric segment as the item: /fire/7 is request 7.
+  const id = model.address.item
+  if (/^\d+$/.test(id)) return { request: Number(id) }
   const m = model.address.q.get("missions") ?? ""
   return m !== "" ? { missions: m } : null
 }
@@ -156,9 +158,8 @@ function review(params: Record<string, unknown>): Html {
   return html`<div class="review">
     <section class="card" data-key="head"><h2>${r.request ? html`Request ${r.request.id}` : "Authorize missions"}</h2>
       ${r.request ? html`<p>${r.request.reason}</p><p class="muted">Asked for <code>${r.request.missions}</code>${r.request.requested_by ? ` by API key ${r.request.requested_by}` : ""}${closed ? `; ${r.request.status}` : ""}.</p>` : EMPTY}
-      <p class="hint">Read every draft and target below: the key fires exactly these, one shot each. A mission edited after the key is made falls out of it.</p></section>
-    ${r.missions.map(mission)}
-    ${closed ? EMPTY : html`<section class="card" data-key="create"><h2>Create the key</h2>
+      <p class="hint">Read every draft and target below the approval: the key fires exactly these, one shot each. A mission edited after the key is made falls out of it.</p></section>
+    ${closed ? EMPTY : html`<section class="card" data-key="create"><h2>Approve: create the key</h2>
       <p>${chosen.length === 0 ? "No mission ticked: nothing can be authorized." : html`${chosen.length} mission${chosen.length === 1 ? "" : "s"}: <code>${chosen.map((m) => m.id).join(", ")}</code>`}</p>
       <label>Usable by <select data-act="usable" data-on="change">
         <option value=""${flag("selected", usableBy === "")}>this session and any of my API keys</option>
@@ -167,6 +168,8 @@ function review(params: Record<string, unknown>): Html {
       <div class="actions"><button type="button" class="danger" data-act="create"${flag("disabled", chosen.length === 0 || creating)}>Create fire key</button>
         ${r.request ? html`<button type="button" class="ghost" data-act="decline" data-id="${r.request.id}">Decline</button>` : EMPTY}</div>
       ${stepUpPanel()}</section>`}
+    ${r.missions.map(mission)}
+
   </div>`
 }
 
@@ -236,7 +239,7 @@ const fire: View = {
       case "decline":
         return void command("decline", id).then(() => {
           notice("ok", `Request ${id} declined.`)
-          if (model.address.sub === String(id)) go({ lens: "fire", sub: "", q: new Map() })
+          if (model.address.item === String(id)) go({ lens: "fire", sub: "", q: new Map() })
         }).catch(failed)
     }
   },
