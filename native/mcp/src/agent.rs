@@ -124,6 +124,7 @@ impl Agent {
             Effect::Claim { label, args } => Outcome::Claimed(self.up.claim(self.id, &label, &args).await.map_err(|lost| lost.0)),
             Effect::Release(ids) => Outcome::Released(self.up.release(self.id, ids).await.map_err(|lost| lost.0)),
             Effect::Blob { ty, bytes } => Outcome::Blob(self.up.put_blob(ty, bytes).await),
+            Effect::Check => Outcome::Checked(self.up.rpc("mail.check", &json!({})).await.map_err(|lost| lost.0)),
         }
     }
 

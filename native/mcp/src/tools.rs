@@ -374,6 +374,16 @@ pub fn list(m: Masks) -> Vec<Json> {
             false,
         ));
     }
+    if table_named("mailboxes").is_some_and(|t| m.reads(t)) {
+        out.push(tool(
+            "mail_check",
+            "Prove the mail wire",
+            "Sends one message from the linked Gmail to itself — the account's own address, spelled by the node — through the same submission path an application takes, and answers what the wire did: the endpoint and how it was secured (STARTTLS on 587), Gmail's acceptance line, how long it took, the Message-ID it minted, and the UID of the copy Gmail filed in its Sent. To the linked address only: an agent can prove the wire, never address anyone else, and nothing fired this way can reach a company. Three an hour, each audited. Answers not_linked (no Gmail linked), limit (three an hour), auth (Gmail refused the app password), refused (Gmail's line), unreachable (the submission port did not answer).".into(),
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+            false,
+            false,
+        ));
+    }
     if table_named("cv_rules").is_some_and(|t| m.reads(t)) {
         out.push(tool(
             "cv",

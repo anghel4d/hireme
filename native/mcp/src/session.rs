@@ -133,6 +133,8 @@ pub enum Effect {
     Release(Option<Vec<u32>>),
     /// Store a file by its hash.
     Blob { ty: &'static str, bytes: Vec<u8> },
+    /// `mail_check`: one message from the linked Gmail to itself, on the node.
+    Check,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +150,7 @@ pub enum Outcome {
     Claimed(Answer),
     Released(Answer),
     Blob(Result<String, String>),
+    Checked(Answer),
 }
 
 /// What happened upstream, for the agents with somewhere to hear it.
@@ -632,6 +635,7 @@ async fn answer(name: &str, args: Json) -> Result<Json, Json> {
         "missions" | "mission" | "fire_keys" => missions(name, &args).await,
         "request_fire_key" => request_fire_key(&args).await,
         "lease" => lease(&args).await,
+        "mail_check" => mail_check().await,
         "release" => release(&args).await,
         "cv_upload" => cv_upload(&args).await,
         "campaign" => campaign(&args).await,
@@ -945,6 +949,40 @@ async fn report(args: &Json) -> Json {
     }
     last["content"][0]["text"] = json!(said);
     last
+}
+
+/// `mail_check` (docs/mail/passthrough.md): the node sends one message from the
+/// linked Gmail to itself, through the same submission path an application takes,
+/// and answers what the wire did. The recipient is the node's to name — an agent
+/// can prove the wire, never address a third party.
+async fn mail_check() -> Json {
+    let Outcome::Checked(answer) = effect(Effect::Check).await else {
+        unreachable!("a check resumes as Checked")
+    };
+    match answer {
+        Ok(Ok(reply)) => text(checked(&reply), Some(reply), false),
+        Ok(Err(e)) => refused("mail_check", &json!({}), &e),
+        Err(lost) => text(format!("error[session]: {lost}\n   = help: hireme-mcp reconnects on its own; call `mail_check` again\n"), None, true),
+    }
+}
+
+/// The check's answer as lines: what went out, how, and where it landed.
+fn checked(r: &Json) -> String {
+    let s = |k: &str| r.get(k).and_then(Json::as_str).unwrap_or("").to_owned();
+    let n = |k: &str| r.get(k).and_then(Json::as_u64);
+    let mut out = format!("{}: one message, sent to itself\n", s("address"));
+    out.push_str(&format!("  endpoint   {} ({})\n", s("endpoint"), s("tls")));
+    out.push_str(&format!("  gmail      {}\n", s("accepted")));
+    if let Some(ms) = n("ms") {
+        out.push_str(&format!("  took       {ms} ms\n"));
+    }
+    out.push_str(&format!("  message-id {}\n", s("message_id")));
+    match n("sent_uid") {
+        Some(uid) => out.push_str(&format!("  sent       uid {uid} in Gmail's Sent\n")),
+        None => out.push_str("  sent       Gmail's Sent had not caught up; look in the inbox\n"),
+    }
+    out.push_str("  the wire an application takes: replies to it file themselves, and a fired mission goes the same way\n");
+    out
 }
 
 async fn lease(args: &Json) -> Json {

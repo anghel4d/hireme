@@ -29,7 +29,7 @@ defmodule Hireme.Gmail do
   require Logger
 
   alias Hireme.{Accounts, Audit, Grants, Repo, Schema, Security, Sequencer}
-  alias Hireme.Gmail.{Imap, Mime, Session}
+  alias Hireme.Gmail.{Imap, Mime, Session, Smtp}
   alias Hireme.Kernel.Nif
   alias Hireme.Outreach
   alias Hireme.Outreach.Email
@@ -283,6 +283,133 @@ defmodule Hireme.Gmail do
   defp restart(account_id) do
     Session.stop(account_id)
     start(account_id)
+  end
+
+  @doc """
+  One message to the linked address and nobody else, through the very
+  submission path an application takes, answering what the wire did: the
+  endpoint, how it was secured, Gmail's acceptance line, how long it took,
+  the Message-ID minted, and the UID of the copy Gmail filed in Sent (nil
+  when Sent has not caught up yet).
+
+  The recipient is the mailbox itself, spelled by the node, never by the
+  caller: this proves the wire, it does not deliver a message to anyone.
+  Refused `:not_linked`, `:limit` (three an hour), or why Gmail said no.
+  """
+  @spec check(pos_integer) :: {:ok, map} | {:error, term}
+  def check(account_id) do
+    with {:ok, box} <- linked(account_id),
+         :ok <- check_limit(account_id),
+         {:ok, password} <- password(account_id) do
+      {host, port} = endpoint(:smtp)
+      tls = endpoint_tls(:smtp)
+      id = "hireme-check-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+      id = id <> "@" <> (box.address |> String.split("@") |> List.last())
+      started = System.monotonic_time(:millisecond)
+
+      result =
+        Smtp.deliver(
+          %{host: host, port: port, cacerts: cacerts(), tls: tls, timeout: 20_000},
+          box.address,
+          password,
+          box.address,
+          [box.address],
+          Smtp.compose(%{
+            from: box.address,
+            from_name: "Hireme",
+            to: [box.address],
+            subject: "hireme: the mail wire, checked",
+            body: checked_body(host, port, tls),
+            message_id: id,
+            date: System.system_time(:second)
+          })
+        )
+
+      ms = System.monotonic_time(:millisecond) - started
+
+      case result do
+        {:ok, accepted} ->
+          Audit.record(
+            :mail_checked,
+            %{address: box.address, message_id: id, accepted: accepted},
+            %{account_id: account_id}
+          )
+
+          {:ok,
+           %{
+             address: box.address,
+             endpoint: "#{host}:#{port}",
+             tls: to_string(tls),
+             accepted: accepted,
+             ms: ms,
+             message_id: id,
+             sent_uid: sent_uid(box.address, password, id)
+           }}
+
+        {:error, why} ->
+          {:error, check_error(why)}
+      end
+    end
+  end
+
+  defp linked(account_id) do
+    case mailbox(account_id) do
+      %{status: status, secret: sealed} = box when status != :unlinked and is_binary(sealed) ->
+        {:ok, box}
+
+      _ ->
+        {:error, :not_linked}
+    end
+  end
+
+  defp check_limit(account_id) do
+    case Security.limit(:mail_check, account_id) do
+      :ok -> :ok
+      {:error, :rate_limited} -> {:error, :limit}
+    end
+  end
+
+  defp check_error({:permanent, reply}), do: {:refused, reply}
+  defp check_error({:temporary, reply}), do: {:refused, reply}
+  defp check_error({:unknown, _}), do: :unknown
+  defp check_error({:network, _}), do: :unreachable
+  defp check_error(:auth), do: :auth
+  defp check_error(other), do: other
+
+  # Gmail's own copy: the promise is that the mail lives in Sent, so the
+  # answer says whether it got there. Best effort and bounded; a nil only
+  # means Sent had not caught up when the check looked.
+  defp sent_uid(address, password, message_id) do
+    {host, port} = endpoint(:imap)
+
+    with {:ok, conn} <- Imap.connect(host, port, cacerts(), 10_000),
+         {:ok, conn} <- Imap.login(conn, address, password) do
+      uid =
+        with {:ok, _info, conn} <- Imap.select(conn, "[Gmail]/Sent Mail"),
+             {:ok, [uid | _], _conn} <- Imap.message_id(conn, message_id) do
+          uid
+        else
+          _ -> nil
+        end
+
+      Imap.logout(conn)
+      uid
+    else
+      _ -> nil
+    end
+  end
+
+  defp checked_body(host, port, tls) do
+    """
+    This is hireme, checking the mail wire before it is trusted with anything.
+
+    It went out over #{host}:#{port} (#{tls}) with the app password you linked,
+    from this address to this address, and it is not a draft, a mission or a
+    fire: one message, so you can see the path an application would take.
+
+    If it is in your inbox and this account's Sent, the wire is open: replies
+    to it file themselves, and an application fired later goes the same way.
+    """
   end
 
   @doc "The app password of the account's mailbox, for its session alone."

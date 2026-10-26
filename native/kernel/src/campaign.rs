@@ -953,7 +953,7 @@ fn call(f: &Facts, act: &Act) -> (&'static str, Json, String) {
             (
                 "request_fire_key",
                 json!({"missions": range, "reason": alloc::format!("{} · {}: {}", f.company, f.role, kinds.join(", ")).chars().take(280).collect::<String>()}),
-                "ask the operator for a fire key covering exactly these missions".into(),
+                alloc::format!("ask the operator for a fire key covering exactly these missions{}", if kinds.iter().any(|k| *k == Kind::Email.name()) { "; an email's first fire goes through the linked Gmail, so mail_check proves that wire first" } else { "" }),
             )
         }
         Act::Fire { mission, key } => {

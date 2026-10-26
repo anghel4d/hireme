@@ -37,6 +37,7 @@ pub fn shape(tool: &str) -> Option<String> {
         "request_fire_key" => format!(r#"{{"missions":"33-34,56","reason":"<why these shots, at most {} chars>"}}"#, kernel::fire::REASON_MAX),
         "cv_upload" => r#"{"root_id":<cv_roots id>,"name":"cv.pdf","base64":"<the file>","note":"<what changed>"}"#.into(),
         "campaign" => r#"{}  or  {"run":"apply"}  or  {"application":"app:412"}"#.into(),
+        "mail_check" => "{}".into(),
         "man" => r#"{}  or  {"page":"put"}  or  {"page":"7 apply"}  or  {"k":"<word>"}"#.into(),
         other => return tools::command_named(other).map(command_shape),
     })

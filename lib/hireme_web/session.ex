@@ -30,7 +30,7 @@ defmodule HiremeWeb.Session do
   @behaviour WebSock
 
   require Logger
-  alias Hireme.{Grants, Lease, Security, Sequencer}
+  alias Hireme.{Grants, Lease, Schema, Security, Sequencer}
   alias HiremeWeb.Wire.Codec
 
   @hello_ms 10_000
@@ -414,6 +414,16 @@ defmodule HiremeWeb.Session do
       else: refuse(id, :type, %{column: "ids"}, state)
   end
 
+  # An agent may prove the mail wire, because the node spells the recipient:
+  # one message to the account's own linked address and nobody else. Gated on
+  # the key reading the mailbox at all, and the answer is what the send did —
+  # endpoint, TLS, Gmail's line, Message-ID, and the UID in Sent.
+  defp rpc(id, "mail.check", params, state) do
+    if params == %{} or params == nil,
+      do: mail_check(id, state),
+      else: refuse(id, :type, %{expected: %{}}, state)
+  end
+
   defp rpc(id, "account." <> _ = method, params, state) do
     ctx = %{
       account_id: state.account_id,
@@ -428,6 +438,12 @@ defmodule HiremeWeb.Session do
   end
 
   defp rpc(id, method, _params, state), do: refuse(id, :not_found, %{method: method}, state)
+
+  defp mail_check(id, state) do
+    if Grants.read?(state.session.grants, Schema.table("mailboxes")),
+      do: answer(id, Hireme.Gmail.check(state.account_id), state),
+      else: refuse(id, :scope, %{table: "mailboxes"}, state)
+  end
 
   # `{count, stage?}`, `{ids}` or `{}`, each of its type.
   defp claim_shape?(params) do

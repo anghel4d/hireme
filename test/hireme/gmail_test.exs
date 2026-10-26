@@ -380,6 +380,37 @@ defmodule Hireme.GmailSessionTest do
     refute item("old@acme.example")
   end
 
+  test "a mail check sends one message to the account's own address, then finds it in Gmail's Sent",
+       %{account: a, fake: fake} do
+    linked(a)
+
+    assert {:ok, checked} = Gmail.check(a.id)
+
+    assert checked.address == @user
+    assert checked.endpoint == "localhost:#{fake.smtp_port}"
+    # the fake listens plain and upgrades, like 587
+    assert checked.tls == "starttls"
+    assert checked.accepted =~ "2.0.0"
+    assert is_integer(checked.ms)
+    assert checked.message_id =~ "@gmail.com"
+
+    # The one recipient is the account itself, never a caller's choice.
+    assert [%{from: @user, rcpts: [@user]}] = FakeGmail.sent(fake)
+
+    # And Gmail's own copy: the promise the answer makes.
+    assert is_integer(checked.sent_uid)
+
+    # Three an hour, then it says so instead of spending the wire again.
+    assert {:ok, _} = Gmail.check(a.id)
+    assert {:ok, _} = Gmail.check(a.id)
+    assert {:error, :limit} = Gmail.check(a.id)
+  end
+
+  test "a mail check without a linked Gmail says so, and sends nothing", %{account: a, fake: fake} do
+    assert {:error, :not_linked} = Gmail.check(a.id)
+    assert FakeGmail.sent(fake) == []
+  end
+
   test "a first contact under a key goes out once from the linked address with its CV and lands; a follow-up in its thread goes without",
        %{account: a, fake: fake, operator: operator} do
     landed = fired(a, operator)

@@ -59,6 +59,13 @@ Brief for the team, 2026-10-22. The operator's words, verbatim, in order:
 - Gmail linked by app password: IMAP to read (IDLE, X-GM-THRID / X-GM-MSGID / X-GM-LABELS), SMTP through Gmail to send, so mail sits in Gmail's Sent and replies land in the inbox. hireme reads only what belongs to the search, labels it `hireme`, and never moves, archives or deletes. The app password never passes through a chat or argv and is sealed at rest.
 - anghel4d.com as a second pipe: its mail already forwards to Gmail; a Cloudflare Email Worker also posts each message to the node, signed; the node dedupes by Message-ID.
 - A daily send cap (25 to start) binds every send. Inbound text is someone else's: untrusted data for agents and the page.
+- The wire is provable before it is trusted: `mail_check`, over MCP and as
+  "Send a test mail" in the account lens, sends one message from the linked
+  mailbox to itself and answers the endpoint, the TLS mode, Gmail's
+  acceptance line, the Message-ID and the UID it landed at in Sent. The
+  recipient is the node's to name, never a caller's, so an agent can prove
+  the path and still reach nobody. The campaign's fire-key ask says to do it
+  before an email's first fire.
 
 ## Rules the operator agreed after review
 

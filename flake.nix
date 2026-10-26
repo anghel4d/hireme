@@ -307,6 +307,14 @@
               linked = op("link()")
               assert linked["linked"], linked
 
+              # The wire is provable before anything is fired: one message, to the
+              # account's own address, filed in Gmail's Sent, and the recipient is
+              # the node's to name — never the agent's.
+              probe = agent("mail_check", key)
+              assert not probe["is_error"] and probe["sent"] == 1 and probe["to_self"], probe
+              for word in ("endpoint", "gmail", "sent", "uid"):
+                  assert word in probe["text"], probe
+
               # Without a key: answered, not an error, and nothing goes out.
               nokey = agent("fire", key, reply, app)
               assert not nokey["is_error"] and nokey["sent"] == 0, nokey

@@ -86,6 +86,16 @@ def step(name, key, *args):
         # edit MISSION APPLICATION: the agent rewrites a mission's draft after the key was made.
         err, text = mcp(key, "put", {"table": "missions", "id": int(args[0]), "set": {"draft": "A different text."}}, lease=args[1])
         return {"is_error": err, "text": text}
+    if name == "mail_check":
+        # mail_check: the tool the campaign's first email fire leans on — one
+        # message from the linked Gmail to itself, its recipient never the
+        # caller's to name, and what the wire answered.
+        before = len(sent())
+        err, text = mcp(key, "mail_check", {})
+        time.sleep(2)
+        envelopes = sent()
+        return {"is_error": err, "text": text, "sent": len(envelopes) - before,
+                "to_self": all(e["from"] == e["rcpts"][0] == "check@gmail.com" for e in envelopes[before:])}
     if name == "reply":
         # reply MESSAGE_ID: a recruiter's answer lands in the fake Gmail's inbox.
         mid = "<" + args[0].strip("<>") + ">"

@@ -196,10 +196,16 @@ function mail(): Html {
     ${linked
       ? html`<p><b>${str(m!.address)}</b> ${tag}${m!.last_sync_at ? html` <span class="muted">last sync ${time(m!.last_sync_at)}</span>` : EMPTY}</p>
         ${status === "auth_failed" ? html`<p class="error">${str(m!.last_error) || MAIL_ERR.auth} Link it again with a new app password.</p>` : status === "error" && m!.last_error ? html`<p class="muted">${MAIL_ERR[str(m!.last_error)] ?? str(m!.last_error)}; retrying.</p>` : EMPTY}
-        <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" class="ghost" data-act="mail-pipe">Domain pipe secret</button><button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
+        <p class="row">${status === "auth_failed" && v().open !== "mail" ? html`<button type="button" data-act="open" data-form="mail">Relink</button>` : EMPTY}<button type="button" data-act="mail-check">Send a test mail</button><button type="button" class="ghost" data-act="mail-pipe">Domain pipe secret</button><button type="button" class="ghost" data-act="mail-unlink">Unlink</button></p>`
       : html`<p class="muted">Link your Gmail: replies to your applications file themselves here, and mail sent from hireme sits in Gmail's Sent. hireme reads only the job search's mail, labels it hireme, and never moves, archives or deletes anything.</p>`}
     ${v().open === "mail" ? form : linked ? EMPTY : html`<button type="button" data-act="open" data-form="mail">Link Gmail</button>`}
   </section>`
+}
+
+/** What a completed check reads as: the path it took, and where Gmail put it. */
+function mailChecked(r: Row): string {
+  const where = r.sent_uid === null || r.sent_uid === undefined ? "Gmail's Sent had not caught up; look in the inbox" : `filed in Gmail's Sent as uid ${r.sent_uid}`
+  return `Sent to itself over ${str(r.endpoint)} (${str(r.tls)}) in ${num(r.ms)} ms, ${where}.`
 }
 
 async function linkMail(address: string, password: string): Promise<void> {
@@ -575,6 +581,8 @@ function act(name: string, el: HTMLElement): void {
       if (box) box.value = ""
       return void linkMail((f.address ?? "").trim(), password)
     }
+    case "mail-check":
+      return void call("account.mail.check", {}, (r) => notice("ok", mailChecked(r)))
     case "mail-pipe":
       return void call("account.mail.pipe")
     case "mail-unlink":

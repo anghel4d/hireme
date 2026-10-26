@@ -185,7 +185,9 @@ defmodule Hireme.Security do
     # Gmail links tried per account, each a login to Google.
     mailbox_link: {:timer.minutes(10), 5},
     # Signed messages one domain pipe posts (`HiremeWeb.MailInbound`), per pipe.
-    mail_inbound: {:timer.minutes(10), 600}
+    mail_inbound: {:timer.minutes(10), 600},
+    # Mail checks (one message, to the linked address only), per account.
+    mail_check: {:timer.hours(1), 3}
   }
 
   @doc "The named limits, for SECURITY.md and the account lens."

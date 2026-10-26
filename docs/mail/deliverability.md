@@ -94,6 +94,14 @@ Gmail accepted it and filed it in `[Gmail]/Sent Mail`, which is the whole
 promise of the Gmail link: the mail lives in the operator's own mailbox as if
 written there.
 
+## The wire is a tool now
+
+`mail_check` is part of the node: over MCP (gated on the key reading the
+mailbox, three an hour, audited) and as "Send a test mail" in the account
+lens. It is the probe that was run by hand, made repeatable — and the
+campaign's fire-key ask tells an agent to call it before an email's first fire,
+so the check travels with the routine rather than living in a shell history.
+
 ## What is still unproven
 
 The probe I designed earlier — one identical message down both paths to

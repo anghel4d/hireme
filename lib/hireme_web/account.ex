@@ -277,12 +277,19 @@ defmodule HiremeWeb.Account do
     if Mfa.fresh?(s), do: Hireme.Provenance.distrust(id, ctx(meta, s)), else: {:error, :step_up}
   end
 
-  ## The Gmail link: browser plus step-up to hand over the app password or
-  ## mint the pipe's secret; unlinking only takes access away.
+  ## The Gmail link: browser plus step-up to hand over the app password,
+  ## mint the pipe's secret or prove the wire with one message to the
+  ## account's own address; unlinking only takes access away.
 
   defp run("account.mail.link", %{"address" => a, "app_password" => p}, s, _meta)
        when is_binary(a) and is_binary(p) do
     if Mfa.fresh?(s), do: Hireme.Gmail.link(s.account_id, a, p), else: {:error, :step_up}
+  end
+
+  # One message from the linked Gmail to itself: what an application's send
+  # will do, proven now rather than at the first fire.
+  defp run("account.mail.check", _params, s, _meta) do
+    if Mfa.fresh?(s), do: Hireme.Gmail.check(s.account_id), else: {:error, :step_up}
   end
 
   defp run("account.mail.unlink", _params, s, _meta), do: Hireme.Gmail.unlink(s.account_id)

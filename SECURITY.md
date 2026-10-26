@@ -294,8 +294,14 @@ the Gmail inbox, and hireme files a copy.
   server's response code, never a subject, body or address.
 - **Transport.** TLS 1.2 or 1.3, peer-verified against the system CAs,
   with SNI and a hostname check, to `imap.gmail.com:993` and
-  `smtp.gmail.com:465` only; the linked address is `@gmail.com` or
-  `@googlemail.com` for now. An authentication failure stops that
+  `smtp.gmail.com:587` (implicit TLS on 465 where an endpoint names it)
+  only; the linked address is `@gmail.com` or `@googlemail.com` for now.
+- **The wire can be proven.** `mail_check` sends one message from the
+  linked mailbox to itself and nothing else: the recipient is the node's
+  to spell, never the caller's, so an agent holding a key that reads the
+  mailbox can prove the submission path without reaching a third party.
+  Three an hour per account, audited, and the operator has the same
+  action in the account lens (`account.mail.check`, stepped up). An authentication failure stops that
   mailbox (`auth_failed`), tells the operator, and retries the credential
   at most once an hour; network failures back off from one minute to 30.
 - **Inbound text** is someone else's: parsed within bounds (25 MiB, 200

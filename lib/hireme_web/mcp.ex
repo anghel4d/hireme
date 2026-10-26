@@ -732,6 +732,20 @@ defmodule HiremeWeb.Mcp.Session do
     resume(s, ticket, %{released: %{ok: reply}}, to)
   end
 
+  # One message from the linked Gmail to itself: the wire an application takes,
+  # proven to the operator's own inbox. Blocking here is the shape of the other
+  # effects, and the node's own send is bounded: at most twenty seconds of
+  # submission plus ten of IMAP, never the page's patience.
+  defp effect(s, ticket, :check, to) do
+    checked =
+      case Hireme.Gmail.check(s.account_id) do
+        {:ok, reply} -> %{ok: reply}
+        {:error, reason} -> %{error: %{code: to_string(reason), data: %{}}}
+      end
+
+    resume(s, ticket, %{checked: checked}, to)
+  end
+
   defp effect(s, ticket, {:blob, type, bytes}, to) do
     stored =
       case Hireme.Blobs.put(s.account_id, bytes, type) do

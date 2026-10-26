@@ -50,7 +50,7 @@ use rustler::{Atom, Binary, Encoder, Env, NifResult, ResourceArc, Term};
 use serde_json::Value as Json;
 
 mod atoms {
-    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids, answer, pending, wait, submit, claim, release, blob, lost, none,
+    rustler::atoms! { ok, error, refused, panic, new, human, key, body, actor, key_id, now_day, now_s, held_ids, answer, pending, wait, submit, claim, release, blob, check, lost, none,
     len, hash, kind, ticket, nan, put, drop, command }
 }
 
@@ -635,6 +635,7 @@ fn step_term<'a>(env: Env<'a>, step: Step) -> NifResult<Term<'a>> {
                 Effect::Claim { label, args } => (atoms::claim(), label, args.to_string()).encode(env),
                 Effect::Release(ids) => (atoms::release(), ids).encode(env),
                 Effect::Blob { ty, bytes } => (atoms::blob(), ty, bin(env, &bytes)?).encode(env),
+                Effect::Check => atoms::check().encode(env),
             };
             (atoms::pending(), t, e).encode(env)
         }
